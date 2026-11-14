@@ -14,7 +14,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
-from .core import Config, Error, Workspace, no_symlinks, run
+from .core import Config, Error, Service, Workspace, no_symlinks, run
 from .providers import provider
 
 
@@ -237,6 +237,7 @@ class AI:
                         self.on_warning(message)
             arguments = [*self.config.agent_args.get(tool, []), *(extra_args or [])]
             command = selected.command(mode, arguments)
+            Service(self.config).context(workspace)
             return tmux._new(workspace, desired, command, tool, split)
 
 

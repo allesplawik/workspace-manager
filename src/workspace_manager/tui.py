@@ -54,6 +54,27 @@ class Confirm(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class MemoryView(ModalScreen[None]):
+    BINDINGS: ClassVar[list[BindingType]] = [("escape", "close", "Close")]
+
+    def __init__(self, snapshot: dict[str, str]):
+        super().__init__()
+        self.snapshot = snapshot
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(classes="dialog"):
+            yield Label("Shared workspace memory — max 400 words / 4000 characters")
+            yield Static(self.snapshot["path"], markup=False)
+            yield Static(self.snapshot["content"], markup=False)
+            yield Button("Close", id="close")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(None)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class Create(ModalScreen[dict[str, str] | None]):
     BINDINGS: ClassVar[list[BindingType]] = [("escape", "cancel", "Cancel")]
 
@@ -152,15 +173,36 @@ class AddRepo(ModalScreen[dict[str, Any] | None]):
                 branch = str(selected)
             if mode == "detached":
                 branch = None
-            self.dismiss(
-                {
-                    "source": Path(self.query_one("#source", Input).value).expanduser(),
-                    "name": self.query_one("#name", Input).value,
-                    "branch": branch,
-                    "ref": self.query_one("#ref", Input).value,
-                    "new": mode != "existing",
-                }
+            self.preview_repository(branch, mode)
+
+    @work(exclusive=True, group="repo-preview")
+    async def preview_repository(self, branch: str | None, mode: str) -> None:
+        from .core import safe_name
+
+        result: dict[str, Any] = {
+            "source": Path(self.query_one("#source", Input).value).expanduser(),
+            "name": self.query_one("#name", Input).value,
+            "branch": branch,
+            "ref": self.query_one("#ref", Input).value,
+            "new": mode != "existing",
+        }
+        try:
+            safe_name(result["name"])
+            if mode == "new" and not branch:
+                raise Error("Enter a new branch name")
+            await asyncio.to_thread(
+                Git.command,
+                result["source"],
+                result["source"].parent / result["name"],
+                branch,
+                result["ref"],
+                result["new"],
             )
+        except (Error, OSError, ValueError) as exc:
+            self.query_one("#error", Static).update(str(exc))
+            self.notify(str(exc), severity="error", timeout=10)
+            return
+        self.dismiss(result)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -317,6 +359,7 @@ class Manager(App[None]):
         ("g", "refresh", "Git status"),
         ("r", "refresh", "Refresh"),
         ("s", "settings", "Settings"),
+        ("m", "memory", "Workspace memory"),
         ("d", "delete", "Safe delete"),
         ("question_mark", "help", "Help"),
         ("slash", "search", "Search"),
@@ -599,11 +642,23 @@ class Manager(App[None]):
         except (Error, OSError, ValueError) as exc:
             self.message(str(exc))
 
+    @work
+    async def action_memory(self) -> None:
+        from .memory import Memory
+
+        try:
+            workspace = self.selected()
+            await asyncio.to_thread(self.service.context, workspace)
+            snapshot = await asyncio.to_thread(Memory(workspace).read)
+            self.push_screen(MemoryView(snapshot))
+        except (Error, OSError, ValueError) as exc:
+            self.message(str(exc))
+
     def action_help(self) -> None:
         self.push_screen(
             Confirm(
                 "N create; A add repo; T open terminal; V new terminal; C Claude; X Codex; G status; "
-                "D safe removal; S settings; Q quit. Enter selects workspace or pane.\n"
+                "D safe removal; S settings; M workspace memory; Q quit. Enter selects workspace or pane.\n"
                 "tmux detach: Ctrl-b then d. Terminals survive quitting wm.\n"
                 "AI live processes differ from provider conversation history. "
                 "Resume uses the provider's interactive picker."

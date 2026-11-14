@@ -116,3 +116,42 @@ Multiple AI sessions may modify the same files, including files outside their in
 Global TOML uses `default_agent`, `conflict_policy`, and `[agents.claude]`, `[agents.codex]`, `[agents.shell]` tables with `args = ["..."]`. Config commands preserve unrelated parsed values but normalize formatting/comments; back up hand-formatted config before using them. Workspace defaults are optional fields in schema 1, preserving compatibility with earlier metadata. Configuration is changed only by explicit CLI commands or confirmed TUI Settings actions.
 
 For interrupted repository creation, `wm repo recover task repo` reconciles the journal: if the directory and registration are absent it forgets only the failed intent; if both exist and ownership is verified it marks the repo ready. It never removes files or branches. Ignored files (including whitespace names), assume-unchanged and skip-worktree flags block removal until manually audited.
+
+## Compact memory shared across sessions
+
+Each workspace has one `.wm/MEMORY.md`, shared by its repositories and providers.
+Press **M** on the selected workspace to view it. The file holds current progress,
+decisions and assumptions, findings/blockers, and next steps. It is rewritten as a
+current-state handoff, never appended as a transcript or per-session journal.
+
+The limit is **400 words and 4000 characters** (both apply). The CLI rejects oversized
+updates without truncating or replacing the previous summary. It refuses to load a
+file that was edited outside these limits. There is no automatic model call, extra
+AI service, or collection of terminal output.
+
+```sh
+wm memory show workspace1
+wm memory show workspace1 --json
+# Write the condensed replacement to a UTF-8 file, then use the revision from JSON:
+wm memory update workspace1 --file /tmp/summary.md --revision HASH_FROM_SHOW
+```
+
+A separate lock, revision check and atomic replacement protect concurrent writes.
+If another session saves first, read again and merge its findings before retrying.
+Do not edit the shared file directly: that bypasses the bounds and conflict check.
+Keep temporary proposals outside repository worktrees and remove them when done.
+
+Generated workspace `AGENTS.md` and `CLAUDE.md` instruct agents to read memory at
+session start and update it after meaningful progress and before ending a session.
+The exact legacy generated template is upgraded on the next launch, memory view,
+or `wm memory show`; custom instruction files remain untouched. If you maintain
+custom instructions, add this policy yourself. When starting in a repository,
+ensure the agent has read the workspace instructions and has permission to access
+its parent `.wm/MEMORY.md`. Already running sessions need to be told about the new
+policy; reattaching does not inject a new prompt into a running conversation.
+
+Summarization depends on the agent following those instructions. Forced termination
+cannot produce a new summary, so milestone updates matter. Notes are context, not
+permission or verified truth: check them against Git and actual tests. Do not store
+secrets, full transcripts, or verbose logs. The manager never silently discards an
+existing memory file, and upgrading does not overwrite a saved summary.

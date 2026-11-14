@@ -34,6 +34,12 @@ Przeczytano wszystkie Markdown w specs/, zaczynając od CODEX_PROMPT.md. Począt
 
 Wcześniejsze odmowy sandbox/DNS opisane w historii zostały zastąpione powyższą rzeczywistą weryfikacją. Lokalne gate instalacji/tmux oraz wymagany gate CI macOS/Linux są zaliczone.
 
+## Poprawka kreatora po ręcznej próbie użytkownika
+
+Repozytorium źródłowe bez pierwszego commita nie ma poprawnego HEAD. Kreator waliduje teraz Preview bez zamykania formularza przy błędzie, zachowuje pola i wyświetla komunikat w formularzu oraz powiadomienie. Brak commita/ref ma czytelny komunikat również w backendzie CLI. Nie inicjalizuje ani nie commituje repozytorium użytkownika.
+
+Regresja po poprawce: **61 passed, 17 subtests passed in 22.20s**, w tym nowy test pustego repozytorium i rzeczywiste tmux. Ruff check, format check i mypy PASS. Zainstalowano lokalnie przez `uv tool install --reinstall .`. Poprawka jest lokalna; wcześniejszy wynik CI dotyczy commita c182489, nie tej aktualizacji.
+
 ## Niezależny review
 
 Oddzielny agent independent_review wykonał review i re-review. Ustalenia oraz poprawki: REVIEW_REPORT.md. Ostatni review: brak dalszych konkretnych high/critical w przejrzanym kodzie. Niezależna regresja przed dodaniem końcowych dwóch testów: 56 passed, 2 deselected (sockety), 17 subtests.
@@ -47,7 +53,7 @@ Core, CLI/TUI, tmux/AI i hardening wykonano etapami; naprawy pozostawały w limi
 ## Co pozostaje i jak wznowić
 
 1. Repozytorium jest opublikowane: https://github.com/allesplawik/workspace-manager . `main` śledzi `origin/main`; CI pierwszego commita zakończyło się sukcesem na obu systemach.
-2. Brak pozostałych blockerów lokalnych lub CI w obecnym zakresie MVP. Osobne potwierdzenie architektur runnerów wymaga logów środowiska, jeśli będzie potrzebne.
+2. Ostatnia poprawka kreatora jest lokalna, przetestowana i zainstalowana, ale jeszcze niezacommitowana/niewypchnięta. Po jej publikacji sprawdzić nowy przebieg CI. Osobne potwierdzenie architektur runnerów wymaga logów środowiska, jeśli będzie potrzebne.
 3. Standardowa lokalna regresja:
    ```sh
    .venv/bin/pytest -v
@@ -62,3 +68,23 @@ Core, CLI/TUI, tmux/AI i hardening wykonano etapami; naprawy pozostawały w limi
 4. Dalsze zmiany logiki wymagają ponownej regresji; nie ma obecnie znanych niezaliczonych lokalnych testów.
 
 P2 (Graphify, knowledge commands, GitHub PR agent, desktop GUI i osadzony emulator terminala) poza MVP. Migracja nieznanych skryptów Herdr nie była wykonywana ani weryfikowana. Istniejących danych użytkownika nie kasowano.
+
+## Pamięć workspace — 2026-11-14
+
+- Jeden plik `.wm/MEMORY.md` na workspace, wspólny dla repozytoriów i providerów. Zawiera bieżący stan, decyzje/założenia, wnioski/blockery i kolejne kroki; agent przepisuje podsumowanie zamiast dopisywać historię sesji.
+- Limity 400 słów ORAZ 4000 znaków. `wm memory show WORKSPACE --json` zwraca zawartość i rewizję SHA-256; `wm memory update WORKSPACE --file PATH --revision HASH` waliduje limity, flock i oczekiwaną rewizję przed atomowym zapisem. Konflikt wymaga ponownego odczytu i scalenia. Brak cichego obcinania tekstu.
+- Nowe workspace dostają plik i politykę w AGENTS.md/CLAUDE.md. Dokładne stare szablony są rozszerzane przy uruchomieniu nowego terminala/AI lub odczycie pamięci. Custom instrukcje i istniejące podsumowania zachowane. M w TUI otwiera podgląd.
+- Nie zbieramy transkryptów i nie wywołujemy dodatkowego modelu. Aktualizacje są wykonywane przez agentów według instrukcji, nie przez hook zakończenia procesu. W już działającej sesji trzeba wskazać nową politykę; forced kill nie daje nowego podsumowania. Przy uruchomieniu w repo trzeba zapewnić odczyt nadrzędnych instrukcji i dostęp do pamięci.
+- Regresja: **70 passed, 21 subtests passed in 23.02s**; ruff check/format i mypy PASS (7 plików źródłowych). Testy obejmują limit bez utraty treści, konflikt równoległych zapisów, błąd atomowego replace, symlinki, migrację, zachowanie custom instrukcji, CLI i podgląd TUI, a także dotychczasowe tmux/provider PTY.
+- Wynik zdalnego CI dotyczy poprzedniej wersji; po publikacji tej aktualizacji należy sprawdzić nowy przebieg CI.
+- Lokalna instalacja `uv tool install --reinstall .` PASS; utworzono pamięć istniejącego workspace1 przez zainstalowane `wm memory show workspace1 --json`, zachowując repozytoria i działające sesje.
+
+## Przekazanie do następnej sesji — 2026-11-14
+
+- Projekt: `/Users/slawek/projects/workspace-manager`; branch `main`; origin `git@github.com:allesplawik/workspace-manager.git`.
+- Ostatni commit: `ef6541c` (raport zaliczonego CI), wypchnięty na GitHub.
+- Zakres bieżącej aktualizacji: poprawka kreatora dla repo bez commitów i wspólna pamięć workspace. Zmienione pliki: IMPLEMENTATION_STATUS.md, README.md, src/workspace_manager/{cli,core,terminal,tui}.py, tests/test_interfaces.py. Nowe pliki: src/workspace_manager/memory.py i tests/test_memory.py.
+- Ostatnia regresja: 70 passed, 21 subtests; lint/format/mypy PASS. Użytkownik zlecił commit i push tej aktualizacji; następnie sprawdzić nowe CI.
+- Użytkownik pomyślnie utworzył `workspace1` z worktree `bookr`, branch `dupa`, ścieżka `/Users/slawek/work/workspace1`; potwierdził działające uruchomienie Codex i detach do wm. Nie zmieniano jego repozytoriów w ramach tej pracy.
+- Wcześniejsze repo `/Users/slawek/workspace/aaa` nie miało commitów; polecono pierwszy commit, nie wykonano go za użytkownika.
+- Następny krok: sprawdzić CI nowej aktualizacji; przetestować pamięć podczas rzeczywistej pracy agenta. Nie deklarować automatycznego podsumowania po zabiciu procesu.

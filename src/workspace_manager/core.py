@@ -237,17 +237,24 @@ class Git:
         Git.source(source)
         if ref.startswith("-") or not ref or "\x00" in ref:
             raise Error("Invalid ref")
-        run(
-            [
-                "git",
-                "-C",
-                str(source),
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                ref + "^{commit}",
-            ]
-        )
+        try:
+            run(
+                [
+                    "git",
+                    "-C",
+                    str(source),
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    ref + "^{commit}",
+                ]
+            )
+        except Error as exc:
+            raise Error(
+                f"Cannot resolve start ref {ref!r} to a commit. "
+                "A new repository needs its first commit before creating a worktree. "
+                "Check the selected repository and ref."
+            ) from exc
         args = ["git", "-C", str(source), "worktree", "add"]
         if branch:
             run(["git", "check-ref-format", "--branch", branch])
@@ -392,6 +399,10 @@ class Service:
             return workspace
 
     def context(self, workspace: Workspace) -> None:
+        from .memory import Memory
+
+        memory = Memory(workspace)
+        memory.read()
         text = (
             f"# Workspace {workspace.name}\n\n"
             "Repositories are independent Git worktrees. Never reset, clean, force or delete branches.\n"
@@ -401,13 +412,16 @@ class Service:
             "Current repository paths and sources are listed in .wm/workspace.json.\n"
             "Inspect actual Git status and branch; metadata is not authoritative.\n"
         )
+        instructions = memory.instructions()
         for filename in ("CLAUDE.md", "AGENTS.md"):
             path = no_symlinks(Path(workspace.path) / filename)
             try:
                 with path.open("x") as stream:
-                    stream.write(text)
+                    stream.write(text + instructions)
             except FileExistsError:
-                pass
+                # Upgrade only the exact legacy template; preserve custom instructions.
+                if path.read_text() == text:
+                    atomic_text(path, text + instructions)
 
     def add(
         self,

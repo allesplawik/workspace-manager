@@ -19,11 +19,13 @@ repo_app = typer.Typer()
 terminal_app = typer.Typer()
 ai_app = typer.Typer()
 config_app = typer.Typer()
+memory_app = typer.Typer()
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(repo_app, name="repo")
 app.add_typer(terminal_app, name="terminal")
 app.add_typer(ai_app, name="ai")
 app.add_typer(config_app, name="config")
+app.add_typer(memory_app, name="memory")
 
 
 @app.callback(invoke_without_command=True)
@@ -321,6 +323,37 @@ def conflict_policy(policy: str, workspace: str | None = None) -> None:
     else:
         service.config.conflict_policy = policy
         service.config.save()
+
+
+@memory_app.command("show")
+def memory_show(
+    workspace: str,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Read the compact shared handoff (JSON includes its revision for safe updates)."""
+    from .memory import Memory
+
+    service = Service()
+    current = service.get(workspace)
+    service.context(current)
+    snapshot = Memory(current).read()
+    typer.echo(json.dumps(snapshot, ensure_ascii=False) if as_json else snapshot["content"])
+
+
+@memory_app.command("update")
+def memory_update(
+    workspace: str,
+    file: Annotated[Path, typer.Option("--file")],
+    revision: Annotated[str, typer.Option("--revision")],
+) -> None:
+    """Replace the summary; reject oversized text and changes based on stale revisions."""
+    from .memory import MAX_BYTES, Memory
+
+    with file.expanduser().open("rb") as stream:
+        data = stream.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:
+        raise Error("Proposed memory is too large; condense it before saving")
+    typer.echo(Memory(Service().get(workspace)).update(data.decode("utf-8"), revision))
 
 
 @app.command("doctor")

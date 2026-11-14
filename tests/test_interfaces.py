@@ -182,3 +182,37 @@ class WizardTests(unittest.IsolatedAsyncioTestCase):
                     await app.workers.wait_for_complete()
                     self.assertEqual(service.get("wizard").default_agent, "claude")
                     self.assertEqual(Config.load().default_agent, "codex")
+
+
+@unittest.skipUnless(HAS_UI, "Textual unavailable; install .[dev]")
+class EmptyRepositoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_preview_keeps_empty_repository_form_and_shows_error(self):
+        from textual.widgets import Button, Input, Static
+
+        from workspace_manager.tui import AddRepo, Manager
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "source"
+            run(["git", "init", "-b", "main", str(source)])
+            service = Service(Config(root / "work", root, root / "state"))
+            app = Manager(service)
+            async with app.run_test(size=(120, 50)) as pilot:
+                await app.workers.wait_for_complete()
+                app.push_screen(AddRepo(root))
+                await pilot.pause()
+                form = app.screen
+                form.query_one("#source", Input).value = str(source)
+                form.query_one("#name", Input).value = "repo"
+                form.query_one("#branch", Input).value = "feature"
+                form.query_one("#preview", Button).press()
+                await pilot.pause()
+                for _ in range(40):
+                    await pilot.pause(0.05)
+                    if "first commit" in str(form.query_one("#error", Static).render()):
+                        break
+                self.assertIs(app.screen, form)
+                self.assertIn("first commit", str(form.query_one("#error", Static).render()))
+                self.assertEqual(form.query_one("#branch", Input).value, "feature")
+                self.assertEqual(service.list(), [])
+                self.assertFalse((root / "work").exists())
