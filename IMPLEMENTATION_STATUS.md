@@ -1,6 +1,6 @@
 # Workspace Manager v2.0 — stan implementacji
 
-Aktualizacja: 2026-11-14. **Lokalne testy, tmux i instalacja zaliczone; pełne kryteria wydania czekają na CI macOS/Linux.**
+Aktualizacja: 2026-11-14. **Lokalne testy, tmux, instalacja i CI macOS/Linux zaliczone.**
 
 ## Zakres
 
@@ -30,9 +30,9 @@ Przeczytano wszystkie Markdown w specs/, zaczynając od CODEX_PROMPT.md. Począt
 - `.venv/bin/uv tool install --python .venv/bin/python .`, ponowna instalacja po poprawkach oraz dokładne `.venv/bin/uv tool install .` — PASS. Zbudowano pakiet i zainstalowano niezależne narzędzie, nie tylko editable w `.venv`.
 - `/Users/slawek/.local/bin/wm --help`, `wm doctor` i `uv tool list` — PASS. `wm` jest w `~/.local/bin/wm`. `doctor` prawidłowo pokazuje brak `uv` w bieżącym PATH (sam uv jest dostępny jako `.venv/bin/uv`); nie blokuje to działania zainstalowanego wm.
 - Smoke zainstalowanego `wm` z cwd `/tmp`, izolowanym config/state i tymczasowym repo bez origin: create z pierwszym worktree, terminal Shell, rzeczywiste attach przez PTY, Ctrl-b d, start i zamknięcie TUI (exit 0), ponowny attach i detach — PASS. PID powłoki i ustawiona w niej zmienna przetrwały zamknięcie managera. Serwer tmux działał na osobnym tymczasowym sockecie; zamknięto wyłącznie ten testowy serwer.
-- CI macOS/Linux skonfigurowane (dodano również `ruff format --check`), ale **niewykonane**. Wynik lokalny dotyczy macOS Intel; Ubuntu i macOS ARM pozostają niepotwierdzone.
+- CI **PASS** na `ubuntu-latest` i `macos-latest`: workflow `quality`, run #1, commit `c182489d31b5be0a1145fdd93f38ba9d29a1e9a3`, 2026-11-14. Sprawdzono przez GitHub API wynik całego workflow oraz obu jobów i wszystkich kroków: pytest, lint, format, mypy, uv tool install, wm --help, wm doctor. Dowód: https://github.com/allesplawik/workspace-manager/actions/runs/43606797670 . Sam label `macos-latest` nie stanowi osobnego dowodu architektury runnera.
 
-Wcześniejsze odmowy sandbox/DNS opisane w historii zostały zastąpione powyższą rzeczywistą weryfikacją. Lokalny gate instalacji i tmux jest zaliczony; pełny gate wydania pozostaje otwarty do uruchomienia CI.
+Wcześniejsze odmowy sandbox/DNS opisane w historii zostały zastąpione powyższą rzeczywistą weryfikacją. Lokalne gate instalacji/tmux oraz wymagany gate CI macOS/Linux są zaliczone.
 
 ## Niezależny review
 
@@ -46,8 +46,8 @@ Core, CLI/TUI, tmux/AI i hardening wykonano etapami; naprawy pozostawały w limi
 
 ## Co pozostaje i jak wznowić
 
-1. Udostępnić projekt jako repozytorium Git z remote i uruchomić `.github/workflows/ci.yml` na macOS/Linux. Obecny katalog nie zawiera `.git`, remote ani kontekstu GitHub; nie można z niego zlecić zdalnego CI. Nie utworzono commitów.
-2. Potwierdzić wynik CI i osobno macOS ARM, jeśli wymagane jest potwierdzenie obu architektur. Nie deklarować ich na podstawie lokalnego macOS x86_64.
+1. Repozytorium jest opublikowane: https://github.com/allesplawik/workspace-manager . `main` śledzi `origin/main`; CI pierwszego commita zakończyło się sukcesem na obu systemach.
+2. Brak pozostałych blockerów lokalnych lub CI w obecnym zakresie MVP. Osobne potwierdzenie architektur runnerów wymaga logów środowiska, jeśli będzie potrzebne.
 3. Standardowa lokalna regresja:
    ```sh
    .venv/bin/pytest -v
