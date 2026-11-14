@@ -1,0 +1,184 @@
+"""Interface tests run when optional development dependencies are installed."""
+
+import contextlib
+import importlib.util
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from workspace_manager.core import Config, Error, Service, run
+from workspace_manager.terminal import Tmux
+
+HAS_UI = importlib.util.find_spec("textual") is not None
+HAS_CLI = importlib.util.find_spec("typer") is not None
+
+
+@unittest.skipUnless(HAS_CLI, "typer unavailable; install .[dev]")
+class CLITests(unittest.TestCase):
+    def test_help_and_automation_from_other_cwd(self):
+        from typer.testing import CliRunner
+
+        from workspace_manager.cli import app
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            service = Service(Config(root / "work", root, root / "state"))
+            runner = CliRunner()
+            with patch("workspace_manager.cli.Service", return_value=service):
+                self.assertEqual(runner.invoke(app, ["--help"]).exit_code, 0)
+                created = runner.invoke(app, ["workspace", "create", "sample", "--yes"])
+                self.assertEqual(created.exit_code, 0, created.output)
+                selected = runner.invoke(app, ["workspace", "select", "sample", "--print-path"])
+                self.assertEqual(selected.output.strip(), str(root / "work/sample"))
+                status = runner.invoke(app, ["workspace", "status", "sample"])
+                self.assertEqual(json.loads(status.output)["workspace"]["name"], "sample")
+
+
+@unittest.skipUnless(HAS_UI, "Textual unavailable; install .[dev]")
+class UITests(unittest.IsolatedAsyncioTestCase):
+    async def test_create_search_and_repo_refresh(self):
+        from textual.widgets import DataTable, Input
+
+        from workspace_manager.tui import Manager
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            service = Service(Config(root / "work", root, root / "state"))
+            workspace = service.create("sample")
+            source = root / "source"
+            source.mkdir()
+            run(["git", "init", "-b", "main", str(source)])
+            run(
+                [
+                    "git",
+                    "-C",
+                    str(source),
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "initial",
+                ]
+            )
+            app = Manager(service)
+            async with app.run_test(size=(120, 45)) as pilot:
+                await app.workers.wait_for_complete()
+                self.assertEqual(app.query_one("#workspaces", DataTable).row_count, 1)
+                app.current = workspace.id
+                service.add(workspace.id, source, "repo", "feature")
+                app.action_refresh()
+                await app.workers.wait_for_complete()
+                self.assertEqual(app.query_one("#repos", DataTable).row_count, 1)
+                app.query_one("#search", Input).value = "nonexistent"
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                self.assertEqual(app.query_one("#workspaces", DataTable).row_count, 0)
+
+
+@unittest.skipUnless(__import__("shutil").which("tmux"), "tmux unavailable")
+class RealTmuxTests(unittest.TestCase):
+    def test_persistent_isolated_processes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            socket = root / "sockets"
+            socket.mkdir(mode=0o700)
+            # Dedicated socket directory means no interaction with user's tmux server.
+            with patch.dict(os.environ, {"TMUX_TMPDIR": str(socket)}):
+                service = Service(Config(root / "work", root, root / "state"))
+                a, b = service.create("a"), service.create("b")
+                tmux = Tmux()
+                foreign = "foreign-test"
+                run(["tmux", "new-session", "-d", "-s", foreign])
+                try:
+                    pane = tmux.new(a, command=["sleep", "120"])
+                    tmux.new(b)
+                    self.assertEqual(tmux.list(a)[0]["pane"], pane)
+                    self.assertEqual(len(tmux.list(a)), 1)
+                    # Recreate backend: server process survives manager lifetime.
+                    self.assertEqual(Tmux().list(a)[0]["command"], "sleep")
+                    self.assertNotEqual(tmux.list(a)[0]["pane"], tmux.list(b)[0]["pane"])
+                    with self.assertRaises(Error):
+                        tmux.attach(a, tmux.list(b)[0]["pane"])
+                    run(["tmux", "has-session", "-t", "=" + foreign])
+                finally:
+                    for workspace in (a, b):
+                        with contextlib.suppress(Error):
+                            run(["tmux", "kill-session", "-t", "=" + tmux.session(workspace)])
+                    run(["tmux", "kill-session", "-t", "=" + foreign])
+
+
+@unittest.skipUnless(HAS_UI, "Textual unavailable; install .[dev]")
+class WizardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_create_with_first_repo_and_settings(self):
+        from textual.widgets import Button, DataTable, Input, Select
+
+        from workspace_manager.tui import AddRepo, Confirm, Create, Manager, Settings
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            service = Service(Config(root / "work", root, root / "state"))
+            source = root / "source"
+            source.mkdir()
+            run(["git", "init", "-b", "main", str(source)])
+            run(
+                [
+                    "git",
+                    "-C",
+                    str(source),
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "initial",
+                ]
+            )
+            app = Manager(service)
+            with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(root / "config")}):
+                async with app.run_test(size=(120, 50)) as pilot:
+                    await app.workers.wait_for_complete()
+                    await pilot.press("n")
+                    await pilot.pause()
+                    self.assertIsInstance(app.screen, Create)
+                    app.screen.query_one("#name", Input).value = "wizard"
+                    app.screen.query_one("#preview", Button).press()
+                    await pilot.pause()
+                    self.assertIsInstance(app.screen, AddRepo)
+                    app.screen.query_one("#source", Input).value = str(source)
+                    app.screen.query_one("#name", Input).value = "repo"
+                    app.screen.query_one("#branch", Input).value = "wizard-branch"
+                    app.screen.query_one("#preview", Button).press()
+                    for _ in range(40):
+                        await pilot.pause(0.05)
+                        if isinstance(app.screen, Confirm):
+                            break
+                    self.assertIsInstance(app.screen, Confirm)
+                    app.screen.query_one("#confirm", Button).press()
+                    await pilot.pause()
+                    await app.workers.wait_for_complete()
+                    self.assertEqual(app.query_one("#repos", DataTable).row_count, 1)
+                    self.assertEqual(
+                        service.status("wizard")["repos"]["repo"]["branch"], "wizard-branch"
+                    )
+                    await pilot.resize_terminal(80, 24)
+                    await pilot.press("s")
+                    await pilot.pause()
+                    self.assertIsInstance(app.screen, Settings)
+                    app.screen.query_one("#global-agent", Select).value = "codex"
+                    app.screen.query_one("#workspace-agent", Select).value = "claude"
+                    app.screen.query_one("#save", Button).press()
+                    await pilot.pause()
+                    self.assertIsInstance(app.screen, Confirm)
+                    app.screen.query_one("#confirm", Button).press()
+                    await pilot.pause()
+                    await app.workers.wait_for_complete()
+                    self.assertEqual(service.get("wizard").default_agent, "claude")
+                    self.assertEqual(Config.load().default_agent, "codex")

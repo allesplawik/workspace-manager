@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+[project]
+name = "workspace-manager"
+version = "2.0.0"
+description = "Safe Git workspaces with Textual and persistent tmux terminals"
+requires-python = ">=3.12"
+dependencies = ["textual>=0.85,<9", "typer>=0.12,<1"]
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
+[project.scripts]
+wm = "workspace_manager.cli:main"
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+[tool.ruff]
+line-length = 100
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true

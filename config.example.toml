@@ -1,0 +1,17 @@
+# ~/.config/workspace-manager/config.toml
+work_root = "~/work"
+source_root = "~/workspace"
+# Optional; by default respects XDG_STATE_HOME
+# state = "~/.local/state/workspace-manager"
+
+# Equal provider choices: shell, claude, codex
+# Per-workspace override: wm config set-default codex --workspace task
+default_agent = "shell"
+conflict_policy = "warn" # explicit "block" prohibits additional AI sessions in workspace
+
+[agents.claude]
+args = [] # e.g. ["--model", "your-model"]
+[agents.codex]
+args = [] # independently configured; not copied from Claude
+[agents.shell]
+args = []
