@@ -122,7 +122,7 @@ class Tmux:
                 "-F",
                 "#{pane_id}",
                 "-t",
-                "=" + self.session(workspace),
+                "=" + self.session(workspace) + (":" if split else ""),
                 "-c",
                 str(cwd),
             ]
@@ -168,14 +168,54 @@ class Tmux:
             "tmux",
             "switch-client" if os.environ.get("TMUX") else "attach-session",
             "-t",
-            "=" + self.session(workspace),
+            pane or "=" + self.session(workspace),
         ]
         try:
-            result = subprocess.run(args, check=False)
+            if pane and not os.environ.get("TMUX"):
+                result = self._attach_pane(args, workspace, pane)
+            else:
+                result = subprocess.run(args, check=False)
         except OSError as exc:
             raise Error(str(exc)) from exc
         if result.returncode:
             raise Error("tmux attach failed; run wm terminal attach from an interactive terminal")
+
+    def _attach_pane(
+        self, args: builtins.list[str], workspace: Workspace, pane: str
+    ) -> subprocess.CompletedProcess:
+        # Watch only the client started here. Other attached clients and persistent
+        # workspace processes must survive the selected pane exiting.
+        with subprocess.Popen(args) as client:
+            while True:
+                try:
+                    code = client.wait(timeout=0.25)
+                    return subprocess.CompletedProcess(args, code)
+                except subprocess.TimeoutExpired:
+                    pass
+                try:
+                    panes = self.list(workspace)
+                    if any(p["pane"] == pane and p["dead"] == "0" for p in panes):
+                        continue
+                    clients = run(
+                        [
+                            "tmux",
+                            "list-clients",
+                            "-F",
+                            "#{client_pid}\t#{client_name}\t#{session_name}",
+                        ]
+                    )
+                    for row in clients.splitlines():
+                        fields = row.split("\t")
+                        if (
+                            len(fields) == 3
+                            and fields[0] == str(client.pid)
+                            and fields[2] == self.session(workspace)
+                        ):
+                            run(["tmux", "detach-client", "-t", fields[1]])
+                except Error:
+                    # Session/server shutdown also ends attach-session naturally.
+                    # Transient inspection failures must not kill other processes.
+                    continue
 
 
 class AI:
@@ -201,9 +241,17 @@ class AI:
         fresh: bool = False,
         split: bool = False,
         extra_args: builtins.list[str] | None = None,
+        session_id: str | None = None,
     ) -> str:
         tool = tool or workspace.default_agent or self.config.default_agent
         selected = provider(tool)
+        if session_id is not None:
+            from .codex_history import conversation_id
+
+            if tool != "codex" or mode != "resume":
+                raise Error("A conversation ID requires Codex resume mode")
+            session_id = conversation_id(session_id)
+            fresh = True
         tmux = Tmux()
         desired = no_symlinks(cwd or Path(workspace.path))
         root = no_symlinks(Path(workspace.path))
@@ -237,6 +285,8 @@ class AI:
                         self.on_warning(message)
             arguments = [*self.config.agent_args.get(tool, []), *(extra_args or [])]
             command = selected.command(mode, arguments)
+            if session_id is not None:
+                command.append(session_id)
             Service(self.config).context(workspace)
             return tmux._new(workspace, desired, command, tool, split)
 

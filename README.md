@@ -37,7 +37,7 @@ Update after obtaining new source: `uv tool install --reinstall --python 3.12 .`
 
 `wm` starts the TUI from any directory. Enter selects a workspace. N opens the workspace wizard including its first repository; A adds another repository through the tree browser. Enter any accessible absolute directory to browse outside the default source root. Choose an existing branch, a new branch with a start ref/SHA, or detached HEAD; review the Git command before confirming. Each repository has its own branch.
 
-T opens a real tmux session. C/X launch Claude/Codex with new, resume picker or continue mode and a workspace/repository cwd. Enter on a terminal row attaches to that pane. Detach with **Ctrl-b, then d** to return to the manager. Q exits only the manager. Processes remain in tmux; detach does not terminate them. Close processes/windows explicitly inside tmux before removing worktrees. A live AI process is distinct from provider conversation history. G refreshes actual Git status; S edits agent defaults and provider arguments; ? opens help. Search filters workspaces; most recently changed workspaces sort first.
+T opens a real tmux session. C/X launch Claude/Codex with new, resume picker or continue mode and a workspace/repository cwd. Enter on a terminal row attaches to that pane. Detach with **Ctrl-b, then d** to return to the manager. When WM runs outside tmux and attaches to a selected pane, exiting that pane (for example Ctrl-D in a shell) also returns to WM; other panes and processes remain running. WM started inside tmux retains native switch-client behavior. Q exits only the manager. Processes remain in tmux; detach does not terminate them. Close processes/windows explicitly inside tmux before removing worktrees. A live AI process is distinct from provider conversation history. G refreshes actual Git status; S edits agent defaults and provider arguments; ? opens help. Search filters workspaces; most recently changed workspaces sort first.
 
 Automation examples:
 
@@ -61,6 +61,14 @@ wm workspace delete task # unregister empty workspace, retain files
 `wm workspace create` with no name and `wm repo add task` run interactive CLI wizards. Automation must specify a branch or `--detached` when adding a repo. Existing branches use `--existing`; occupied branches are refused without force. `wm workspace create NAME --source PATH --branch BRANCH --yes` creates and populates in one invocation.
 
 Source `shell/wm.sh`, then use `wmcd task` to change the parent shell directory. Interactive selection is `wm workspace select`; pass a name/ID with `--print-path` for scripting.
+
+## Saved Codex conversations
+
+Click a workspace row (or press Enter) to show saved Codex conversations whose working directory is the workspace root. Click a repository row to show conversations for that repository's worktree directory. Select a conversation with a click or Enter to resume that exact conversation in tmux; a different live Codex pane is not reused. Existing conflict warnings/policies still apply.
+
+The history panel shows titles, last update and runtime state. Use **Load older** for earlier conversations or **Refresh history** after closing a session. Saved conversations may still be open in another terminal; the list is not proof that a process has ended. Archived conversations are excluded. Directory matching is exact, so workspace-root history and repository history stay separate.
+
+History uses the public local Codex app-server `thread/list` API, with bounded requests and no model turns. WM does not parse Codex rollout files or private databases, and does not copy conversation transcripts into workspace metadata. If history loading fails or the installed Codex does not support the API, a **Native resume picker** fallback button appears for the selected directory. It stays hidden when history loads successfully. The new-terminal dialog offers Codex New/Continue latest; select a saved conversation from the history panel to resume it. Claude retains its native resume picker because this history list supports Codex only. See the [official app-server protocol](https://developers.openai.com/codex/app-server).
 
 ## Configuration and safety
 

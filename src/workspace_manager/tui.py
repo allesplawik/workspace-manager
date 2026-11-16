@@ -6,15 +6,16 @@ import asyncio
 import json
 import shlex
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar
 
+from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult, SuspendNotSupported
 from textual.binding import BindingType
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
@@ -29,6 +30,7 @@ from textual.widgets import (
     Static,
 )
 
+from .codex_history import CodexHistory, Conversation
 from .core import Error, Git, Service, Workspace, run
 from .providers import PROVIDERS, provider
 from .terminal import AI, Tmux
@@ -225,15 +227,7 @@ class Launch(ModalScreen[dict[str, Any] | None]):
                 for name in PROVIDERS
             ]
             yield Select(choices, value=self.tool, id="provider")
-            yield Select(
-                [
-                    ("New", "new"),
-                    ("Native resume picker", "resume"),
-                    ("Continue latest", "continue"),
-                ],
-                value="new",
-                id="mode",
-            )
+            yield Select(self.mode_choices(self.tool), value="new", id="mode")
             paths = [("Workspace", self.workspace.path)] + [
                 (r.name, str(Path(self.workspace.path) / r.name)) for r in self.workspace.repos
             ]
@@ -251,6 +245,24 @@ class Launch(ModalScreen[dict[str, Any] | None]):
             )
             yield Button("Launch / attach", id="launch")
             yield Button("Cancel", id="cancel")
+
+    @staticmethod
+    def mode_choices(tool: str) -> list[tuple[str, str]]:
+        choices = [("New", "new")]
+        if tool == "claude":
+            choices.append(("Native resume picker", "resume"))
+        if tool != "shell":
+            choices.append(("Continue latest", "continue"))
+        return choices
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id != "provider" or event.value == Select.BLANK:
+            return
+        choices = self.mode_choices(str(event.value))
+        mode = self.query_one("#mode", Select)
+        previous = mode.value
+        mode.set_options(choices)
+        mode.value = previous if previous in {value for _, value in choices} else "new"
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(
@@ -343,6 +355,8 @@ class Manager(App[None]):
     #workspaces { height: 9; }
     #repos { height: 9; }
     #terminals { height: 7; }
+    #conversations { height: 8; }
+    #history-actions { height: 3; }
     .dialog { width: 85%; height: 90%; border: round $accent; padding: 1 2; background: $surface; }
     ModalScreen { align: center middle; }
     DirectoryTree { height: 12; }
@@ -369,8 +383,16 @@ class Manager(App[None]):
         super().__init__()
         self.service = service
         self.values: dict[str, Workspace] = {}
+        self.history_cwd: Path | None = None
+        self.history_workspace: str | None = None
+        self.history_rows: dict[str, Conversation] = {}
+        self.history_cursor: str | None = None
+        self.history_resuming = False
+        self.history_revision = 0
+        self.history_lock = asyncio.Lock()
         self.current: str | None = None
-        self.cache: dict[str, tuple[float, dict[str, dict[str, str]]]] = {}
+        self.details_workspace: str | None = None
+        self.cache: dict[str, tuple[float, tuple[str, ...], dict[str, dict[str, str]]]] = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -381,6 +403,14 @@ class Manager(App[None]):
             yield DataTable(id="repos", cursor_type="row")
             yield Label("Persistent tmux terminals — Enter to attach; detach: Ctrl-b d")
             yield DataTable(id="terminals", cursor_type="row")
+            yield Label(
+                "Saved Codex conversations — select a workspace or repository", id="history-label"
+            )
+            yield DataTable(id="conversations", cursor_type="row")
+            with Horizontal(id="history-actions"):
+                yield Button("Refresh history", id="history-refresh", disabled=True)
+                yield Button("Load older", id="history-more", disabled=True)
+                yield Button("Native resume picker", id="history-native", disabled=True)
             yield Static("", id="message", markup=False)
         yield Footer()
 
@@ -392,6 +422,8 @@ class Manager(App[None]):
         self.query_one("#terminals", DataTable).add_columns(
             "Pane", "Process", "Cwd", "Dead", "Kind"
         )
+        self.query_one("#conversations", DataTable).add_columns("Conversation", "Updated", "State")
+        self.query_one("#history-native", Button).display = False
         self.query_one("#workspaces", DataTable).focus()
         self.action_refresh()
         self.set_interval(15, self.action_refresh)
@@ -417,8 +449,7 @@ class Manager(App[None]):
             values = await asyncio.to_thread(self.service.list)
             query = self.query_one("#search", Input).value.lower()
             table = self.query_one("#workspaces", DataTable)
-            table.clear()
-            self.values = {w.id: w for w in values}
+            rows = []
             if force:
                 self.cache.clear()
             for workspace in values:
@@ -431,57 +462,249 @@ class Manager(App[None]):
                 )
                 if workspace.phase != "ready":
                     summary = workspace.phase
-                table.add_row(
-                    workspace.name, workspace.phase, summary, workspace.path, key=workspace.id
+                rows.append(
+                    (
+                        workspace.id,
+                        (
+                            workspace.name,
+                            workspace.phase,
+                            summary,
+                            workspace.path,
+                        ),
+                    )
                 )
+            # Collect first: no empty/partial table is painted while Git is pending.
+            if query != self.query_one("#search", Input).value.lower():
+                return
+            self.values = {w.id: w for w in values}
+            self.sync_table(table, rows)
             if self.current in self.values:
                 await self.details()
         except (Error, OSError, ValueError) as exc:
             self.message(str(exc))
 
     async def repo_states(self, workspace: Workspace) -> dict[str, dict[str, str]]:
+        signature = (workspace.path, *sorted(repo.name for repo in workspace.repos))
         cached = self.cache.get(workspace.id)
-        if cached and time.monotonic() - cached[0] < 10:
-            return cached[1]
+        if cached and cached[1] == signature and time.monotonic() - cached[0] < 10:
+            return cached[2]
 
         def collect() -> dict[str, dict[str, str]]:
             return {r.name: Git.status(Path(workspace.path) / r.name) for r in workspace.repos}
 
         states = await asyncio.to_thread(collect)
-        self.cache[workspace.id] = (time.monotonic(), states)
+        self.cache[workspace.id] = (time.monotonic(), signature, states)
         return states
+
+    def sync_table(self, table: DataTable, rows: Sequence[tuple[str, tuple[str, ...]]]) -> None:
+        """Publish a complete snapshot without resetting unchanged rows or selection."""
+        old_keys = [row.key.value for row in table.ordered_rows]
+        new_keys = [key for key, _ in rows]
+        selected = old_keys[table.cursor_row] if old_keys else None
+        cursor = table.cursor_row
+        scroll = table.scroll_offset
+        with self.batch_update():
+            if old_keys == new_keys:
+                columns = list(table.columns)
+                for key, cells in rows:
+                    for column, old, new in zip(columns, table.get_row(key), cells):
+                        if old != new:
+                            table.update_cell(key, column, new, update_width=True)
+                return
+            # Membership/order changed: rebuild synchronously, with no await that
+            # could expose an empty intermediate state to the terminal renderer.
+            table.clear()
+            for key, cells in rows:
+                table.add_row(*cells, key=key)
+            if rows:
+                row = (
+                    new_keys.index(selected) if selected in new_keys else min(cursor, len(rows) - 1)
+                )
+                table.move_cursor(row=row, scroll=False)
+                table.scroll_to(x=scroll.x, y=scroll.y, animate=False, force=True)
 
     async def details(self) -> None:
         workspace = self.selected()
-        repo_table = self.query_one("#repos", DataTable)
-        repo_table.clear()
+        if self.details_workspace != workspace.id:
+            # Keep old snapshots only within one scope. Never expose another
+            # workspace's rows as targets for repo/pane actions during loading.
+            with self.batch_update():
+                self.sync_table(self.query_one("#repos", DataTable), [])
+                self.sync_table(self.query_one("#terminals", DataTable), [])
+            self.details_workspace = workspace.id
+            if self.history_workspace is not None and self.history_workspace != workspace.id:
+                self.select_history(Path(workspace.path))
         states = await self.repo_states(workspace)
+        terminals = await asyncio.to_thread(Tmux().list, workspace)
+        if self.current != workspace.id or self.values.get(workspace.id) != workspace:
+            return
+        repos = []
         for repo in workspace.repos:
             state = states[repo.name]
-            repo_table.add_row(
-                repo.name,
-                state["branch"],
-                state["status"] + f" ({repo.phase})",
-                state["changes"],
-                key=repo.name,
+            repos.append(
+                (
+                    repo.name,
+                    (
+                        repo.name,
+                        state["branch"],
+                        state["status"] + f" ({repo.phase})",
+                        state["changes"],
+                    ),
+                )
             )
-        terminals = await asyncio.to_thread(Tmux().list, workspace)
-        table = self.query_one("#terminals", DataTable)
-        table.clear()
-        for pane in terminals:
-            table.add_row(
-                *(pane[k] for k in ("pane", "command", "cwd", "dead", "kind")), key=pane["pane"]
-            )
+        panes = [
+            (pane["pane"], tuple(pane[k] for k in ("pane", "command", "cwd", "dead", "kind")))
+            for pane in terminals
+        ]
+        with self.batch_update():
+            self.sync_table(self.query_one("#repos", DataTable), repos)
+            self.sync_table(self.query_one("#terminals", DataTable), panes)
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         if event.data_table.id == "workspaces":
             self.current = str(event.row_key.value)
             try:
+                self.select_history(Path(self.selected().path))
                 await self.details()
             except (Error, OSError) as exc:
                 self.message(str(exc))
+        elif event.data_table.id == "repos":
+            try:
+                workspace = self.selected()
+                name = str(event.row_key.value)
+                if name in {repo.name for repo in workspace.repos}:
+                    self.select_history(Path(workspace.path) / name)
+            except Error as exc:
+                self.message(str(exc))
+        elif event.data_table.id == "conversations":
+            identifier = str(event.row_key.value)
+            if identifier in self.history_rows:
+                self.resume_history(identifier)
         elif event.data_table.id == "terminals":
             self.attach(str(event.row_key.value))
+
+    def select_history(self, cwd: Path) -> None:
+        self.history_workspace = self.selected().id
+        self.history_cwd = cwd
+        self.history_revision += 1
+        self.history_cursor = None
+        self.history_rows.clear()
+        self.query_one("#conversations", DataTable).clear()
+        self.query_one("#conversations", DataTable).scroll_visible(animate=False)
+        self.query_one("#history-native", Button).display = False
+        self.query_one("#history-native", Button).disabled = True
+        self.query_one("#history-label", Label).update(Text(f"Saved Codex conversations — {cwd}"))
+        self.load_history(self.history_revision)
+
+    @work(group="history")
+    async def load_history(self, revision: int, older: bool = False) -> None:
+        # Serialize native services. Rapid selection changes skip queued stale work.
+        async with self.history_lock:
+            if revision != self.history_revision or self.history_cwd is None:
+                return
+            cwd = self.history_cwd
+            cursor = self.history_cursor if older else None
+            self.query_one("#history-refresh", Button).disabled = True
+            self.query_one("#history-more", Button).disabled = True
+            self.query_one("#history-native", Button).display = False
+            self.query_one("#history-native", Button).disabled = True
+            self.query_one("#history-label", Label).update(Text(f"Loading Codex history — {cwd}"))
+            try:
+                page = await asyncio.to_thread(CodexHistory().list, cwd, cursor)
+                if revision != self.history_revision:
+                    return
+                table = self.query_one("#conversations", DataTable)
+                if not older:
+                    table.clear()
+                    self.history_rows.clear()
+                from datetime import datetime
+
+                for conversation in page.conversations:
+                    if conversation.id in self.history_rows:
+                        continue
+                    self.history_rows[conversation.id] = conversation
+                    try:
+                        updated = datetime.fromtimestamp(conversation.updated_at).strftime(
+                            "%Y-%m-%d %H:%M"
+                        )
+                    except (ValueError, OSError, OverflowError):
+                        updated = "Unknown"
+                    table.add_row(
+                        Text(conversation.title),
+                        updated,
+                        {
+                            "notLoaded": "Saved",
+                            "idle": "Idle",
+                            "active": "Working",
+                            "systemError": "Error",
+                        }.get(conversation.status, "Saved"),
+                        key=conversation.id,
+                    )
+                self.history_cursor = page.next_cursor
+                note = "Enter/click to resume" if self.history_rows else "No saved conversations"
+                self.query_one("#history-label", Label).update(
+                    Text(f"Saved Codex conversations — {cwd} — {note}")
+                )
+            except (Error, OSError, ValueError) as exc:
+                if revision == self.history_revision:
+                    self.query_one("#history-label", Label).update(Text(str(exc)))
+                    self.query_one("#history-native", Button).display = True
+                    self.query_one("#history-native", Button).disabled = False
+            finally:
+                if revision == self.history_revision:
+                    self.query_one("#history-refresh", Button).disabled = False
+                    self.query_one("#history-more", Button).disabled = self.history_cursor is None
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "history-refresh" and self.history_cwd is not None:
+            self.select_history(self.history_cwd)
+        elif event.button.id == "history-more" and self.history_cursor is not None:
+            self.load_history(self.history_revision, True)
+        elif event.button.id == "history-native":
+            self.resume_history(None)
+
+    def resume_history(self, identifier: str | None) -> None:
+        if self.history_resuming:
+            return
+        workspace_id, cwd = self.history_workspace, self.history_cwd
+        if workspace_id is None or cwd is None:
+            return
+        if identifier is not None and identifier not in self.history_rows:
+            return
+        self.history_resuming = True
+        self.launch_history(workspace_id, cwd, identifier)
+
+    @work(group="history-resume")
+    async def launch_history(self, workspace_id: str, cwd: Path, identifier: str | None) -> None:
+        try:
+            workspace = await asyncio.to_thread(self.service.get, workspace_id)
+
+            def warn(message: str) -> None:
+                self.call_from_thread(self.message, "Warning: " + message)
+                self.call_from_thread(self.notify, message, severity="warning", timeout=10)
+
+            launcher = AI(self.service.config, on_warning=warn)
+            pane = await asyncio.to_thread(
+                launcher.launch,
+                workspace,
+                "codex",
+                "resume",
+                cwd,
+                True,
+                session_id=identifier,
+            )
+            if self.current != workspace.id:
+                self.message("Conversation started in its workspace; select it to attach.")
+                return
+            self.attach(pane)
+            if launcher.last_warnings:
+                self.message("Warning: " + " ".join(launcher.last_warnings))
+            if self.history_workspace == workspace_id and self.history_cwd == cwd:
+                self.select_history(cwd)
+        except (Error, OSError, ValueError) as exc:
+            self.message(str(exc))
+        finally:
+            self.history_resuming = False
 
     @work
     async def action_create(self) -> None:
