@@ -62,6 +62,14 @@ wm workspace delete task # unregister empty workspace, retain files
 
 Source `shell/wm.sh`, then use `wmcd task` to change the parent shell directory. Interactive selection is `wm workspace select`; pass a name/ID with `--print-path` for scripting.
 
+## Saved Codex conversations
+
+Click a workspace row (or press Enter) to show saved Codex conversations whose working directory is the workspace root. Click a repository row to show conversations for that repository's worktree directory. Select a conversation with a click or Enter to resume that exact conversation in tmux; a different live Codex pane is not reused. Existing conflict warnings/policies still apply.
+
+The history panel shows titles, last update and runtime state. Use **Load older** for earlier conversations or **Refresh history** after closing a session. Saved conversations may still be open in another terminal; the list is not proof that a process has ended. Archived conversations are excluded. Directory matching is exact, so workspace-root history and repository history stay separate.
+
+History uses the public local Codex app-server `thread/list` API, with bounded requests and no model turns. WM does not parse Codex rollout files or private databases, and does not copy conversation transcripts into workspace metadata. If history loading fails or the installed Codex does not support the API, a **Native resume picker** fallback button appears for the selected directory. It stays hidden when history loads successfully. The new-terminal dialog offers Codex New/Continue latest; select a saved conversation from the history panel to resume it. Claude retains its native resume picker because this history list supports Codex only. See the [official app-server protocol](https://developers.openai.com/codex/app-server).
+
 ## Configuration and safety
 
 Copy `config.example.toml` to `${XDG_CONFIG_HOME:-$HOME/.config}/workspace-manager/config.toml`. Paths expand `~`. Defaults are `~/work`, `~/workspace`, and `${XDG_STATE_HOME:-$HOME/.local/state}/workspace-manager`. Registry/metadata use schema version 1, atomic replace and advisory filesystem locks. Workspace UUIDs define the tmux namespace; existing foreign sessions are never adopted. Git commands use argument arrays, and tmux commands quote each argument. Symlink paths are deliberately refused for managed/source paths.

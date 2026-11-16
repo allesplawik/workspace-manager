@@ -241,9 +241,17 @@ class AI:
         fresh: bool = False,
         split: bool = False,
         extra_args: builtins.list[str] | None = None,
+        session_id: str | None = None,
     ) -> str:
         tool = tool or workspace.default_agent or self.config.default_agent
         selected = provider(tool)
+        if session_id is not None:
+            from .codex_history import conversation_id
+
+            if tool != "codex" or mode != "resume":
+                raise Error("A conversation ID requires Codex resume mode")
+            session_id = conversation_id(session_id)
+            fresh = True
         tmux = Tmux()
         desired = no_symlinks(cwd or Path(workspace.path))
         root = no_symlinks(Path(workspace.path))
@@ -277,6 +285,8 @@ class AI:
                         self.on_warning(message)
             arguments = [*self.config.agent_args.get(tool, []), *(extra_args or [])]
             command = selected.command(mode, arguments)
+            if session_id is not None:
+                command.append(session_id)
             Service(self.config).context(workspace)
             return tmux._new(workspace, desired, command, tool, split)
 
