@@ -4,7 +4,11 @@ import contextlib
 import importlib.util
 import json
 import os
+import pty
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -83,6 +87,58 @@ class UITests(unittest.IsolatedAsyncioTestCase):
 
 @unittest.skipUnless(__import__("shutil").which("tmux"), "tmux unavailable")
 class RealTmuxTests(unittest.TestCase):
+    def test_exiting_attached_shell_returns_without_closing_other_panes(self):
+        self._check_attached_shell_exit(split=False)
+
+    def test_exiting_attached_split_returns_without_closing_other_panes(self):
+        self._check_attached_shell_exit(split=True)
+
+    def _check_attached_shell_exit(self, split):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            socket = root / "sockets"
+            socket.mkdir(mode=0o700)
+            with patch.dict(os.environ, {"TMUX_TMPDIR": str(socket), "TERM": "xterm-256color"}):
+                os.environ.pop("TMUX", None)
+                service = Service(Config(root / "work", root, root / "state"))
+                workspace = service.create("exit-shell")
+                tmux = Tmux()
+                survivor = tmux.new(workspace, command=["sleep", "120"], kind="codex")
+                master, slave = pty.openpty()
+                client = None
+                try:
+                    shell = tmux.new(workspace, command=["/bin/sh"], split=split)
+                    script = (
+                        "from workspace_manager.core import Workspace; "
+                        "from workspace_manager.terminal import Tmux; "
+                        f"Tmux().attach(Workspace(**{workspace.__dict__!r}), {shell!r})"
+                    )
+                    client = subprocess.Popen(
+                        [sys.executable, "-c", script],
+                        stdin=slave,
+                        stdout=slave,
+                        stderr=slave,
+                        start_new_session=True,
+                    )
+                    deadline = time.monotonic() + 10
+                    while not run(["tmux", "list-clients", "-F", "#{client_pid}"]):
+                        self.assertIsNone(client.poll(), "interactive attach exited early")
+                        self.assertLess(time.monotonic(), deadline, "client failed to attach")
+                        time.sleep(0.05)
+                    # Ctrl+D on the actual attached terminal closes the shell.
+                    os.write(master, b"\x04")
+                    self.assertEqual(client.wait(timeout=10), 0)
+                    remaining = tmux.list(workspace)
+                    self.assertEqual([p["pane"] for p in remaining], [survivor])
+                    self.assertEqual(remaining[0]["dead"], "0")
+                finally:
+                    if client is not None and client.poll() is None:
+                        client.terminate()
+                        client.wait(timeout=5)
+                    os.close(master)
+                    os.close(slave)
+                    run(["tmux", "kill-session", "-t", "=" + tmux.session(workspace)])
+
     def test_persistent_isolated_processes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
