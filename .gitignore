@@ -5,3 +5,9 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 dist/
+
+# Local specifications and implementation notes
+/specs/
+/IMPLEMENTATION_STATUS.md
+/features/
+.DS_Store

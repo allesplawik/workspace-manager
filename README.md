@@ -1,6 +1,6 @@
 # Workspace Manager 2.0
 
-Independent workspace manager: Python 3.12+, Textual management UI, real persistent tmux terminals, and independent Git worktrees. No Herdr dependency. See IMPLEMENTATION_STATUS.md for actual verification and remaining release blockers.
+Independent workspace manager: Python 3.12+, Textual management UI, real persistent tmux terminals, and independent Git worktrees. No Herdr dependency.
 
 ## Install on macOS (Intel / Apple Silicon)
 
