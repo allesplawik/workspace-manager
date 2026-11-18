@@ -306,7 +306,10 @@ class WizardTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn(workspace_agent.value, {"inherit", "shell", "claude", "codex"})
                     workspace_agent.value = "claude"
                     app.screen.query_one("#save", Button).press()
-                    await pilot.pause()
+                    for _ in range(40):
+                        await pilot.pause(0.05)
+                        if isinstance(app.screen, Confirm) and app.screen.query("#confirm"):
+                            break
                     self.assertIsInstance(app.screen, Confirm)
                     app.screen.query_one("#confirm", Button).press()
                     await pilot.pause()
