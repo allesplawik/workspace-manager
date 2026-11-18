@@ -1,0 +1,173 @@
+Screen {
+    background: $wm-bg;
+    color: $wm-text;
+}
+Header {
+    background: $wm-panel;
+    color: $wm-text;
+    text-style: bold;
+    height: 1;
+}
+HeaderIcon { color: $wm-accent; }
+HeaderTitle { color: $wm-text; }
+HeaderClock { color: $wm-muted; }
+#body {
+    padding: 0 1;
+    scrollbar-size: 1 1;
+    scrollbar-background: $wm-bg;
+    scrollbar-color: $wm-border;
+    scrollbar-color-hover: $wm-muted;
+    scrollbar-color-active: $wm-accent;
+}
+#search {
+    height: 3;
+    margin-bottom: 1;
+    background: $wm-surface;
+    border: tall $wm-border;
+    color: $wm-text;
+    padding: 0 1;
+}
+#search:focus { border: tall $wm-accent; }
+Input { background: $wm-bg; border: tall $wm-border; color: $wm-text; }
+Input:focus { border: tall $wm-accent; }
+Input > .input--placeholder { color: $wm-muted; }
+Select { background: $wm-bg; }
+SelectCurrent { background: $wm-bg; border: tall $wm-border; color: $wm-text; }
+Select:focus > SelectCurrent { border: tall $wm-accent; }
+SelectOverlay { background: $wm-panel; border: round $wm-border; }
+.dashboard-section {
+    height: auto;
+    margin-bottom: 1;
+    background: $wm-surface;
+    border-left: solid $wm-border;
+}
+#history-section { margin-bottom: 0; }
+SectionHeader {
+    height: 2;
+    padding: 0 1;
+    align-vertical: middle;
+    background: $wm-surface;
+    border-bottom: solid $wm-border;
+}
+.section-title { width: auto; height: 1; text-style: bold; color: $wm-text; }
+.section-count {
+    width: auto;
+    min-width: 3;
+    height: 1;
+    margin-left: 1;
+    padding: 0 1;
+    color: $wm-accent;
+    background: $wm-panel;
+}
+.section-spacer { width: 1fr; height: 1; }
+SectionHeader.-loading .section-count { color: $wm-warning; }
+SectionHeader Button {
+    min-width: 3;
+    width: auto;
+    height: 1;
+    min-height: 1;
+    border: none;
+    padding: 0 1;
+    margin-left: 1;
+    background: $wm-panel;
+    color: $wm-muted;
+    text-style: none;
+}
+SectionHeader Button.primary-action {
+    background: $wm-accent-soft;
+    color: $wm-accent;
+    text-style: bold;
+}
+SectionHeader Button.icon-action { width: 3; padding: 0; margin: 0 1 0 0; }
+SectionHeader Button:hover { background: $wm-hover; color: $wm-text; }
+SectionHeader Button.primary-action:hover { background: $wm-accent; color: $wm-bg; }
+SectionHeader Button:focus { background: $wm-selected; color: $wm-accent; text-style: bold; }
+SectionHeader Button.-active { background: $wm-accent; color: $wm-bg; }
+SectionHeader Button:disabled { color: $wm-disabled; background: $wm-surface; opacity: 75%; }
+.section-content { height: auto; padding: 0 1; }
+.empty-state { height: 1; color: $wm-muted; padding-left: 1; }
+#history-label { height: 1; color: $wm-muted; padding-left: 1; }
+SectionTable {
+    background: $wm-surface;
+    color: $wm-text;
+    border: none;
+    scrollbar-size: 1 1;
+    scrollbar-background: $wm-surface;
+    scrollbar-color: $wm-border;
+    scrollbar-color-hover: $wm-muted;
+    scrollbar-color-active: $wm-accent;
+}
+SectionTable > .datatable--header {
+    background: $wm-panel;
+    color: $wm-muted;
+    text-style: none;
+}
+SectionTable > .datatable--odd-row { background: $wm-surface; }
+SectionTable > .datatable--even-row { background: $wm-surface; }
+SectionTable > .datatable--cursor {
+    background: $wm-selected;
+    color: $wm-text;
+    text-style: none;
+}
+SectionTable:focus > .datatable--cursor { background: $wm-accent-soft; }
+SectionTable > .datatable--hover { background: $wm-hover; }
+Footer { background: $wm-bg; color: $wm-muted; height: 1; }
+Footer > .footer--key { background: $wm-panel; color: $wm-accent; text-style: bold; }
+Footer > .footer--description { background: $wm-bg; color: $wm-muted; }
+Footer > .footer--highlight { background: $wm-selected; }
+#message { height: auto; max-height: 2; color: $wm-warning; padding-left: 1; }
+ModalScreen { align: center middle; background: $wm-bg 65%; }
+.dialog {
+    width: 82;
+    max-width: 96%;
+    height: auto;
+    max-height: 90%;
+    border: round $wm-border;
+    padding: 1 2;
+    background: $wm-surface;
+    color: $wm-text;
+    scrollbar-size: 1 1;
+}
+.dialog > Label { color: $wm-text; text-style: bold; margin-bottom: 1; }
+.dialog Button { min-width: 12; border: tall $wm-border; background: $wm-panel; color: $wm-text; }
+.dialog Button:hover { background: $wm-hover; }
+.dialog Button:focus { border: tall $wm-accent; }
+.dialog #preview, .dialog #launch, .dialog #save { background: $wm-accent-soft; color: $wm-accent; text-style: bold; }
+.dialog #confirm { background: $wm-warning; color: $wm-bg; }
+.dialog #error { color: $wm-error; height: auto; }
+.dialog #info-content { color: $wm-text; }
+DirectoryTree { height: 8; background: $wm-bg; }
+SectionMenu { align: left top; background: transparent; }
+.section-menu {
+    position: absolute;
+    width: 36;
+    max-width: 96%;
+    height: auto;
+    max-height: 96%;
+    border: round $wm-border;
+    background: $wm-panel;
+    padding: 0 1;
+    scrollbar-size: 1 1;
+}
+.section-menu Label { color: $wm-muted; height: 1; margin-bottom: 1; }
+.section-menu Button {
+    width: 100%;
+    min-width: 1;
+    height: 1;
+    min-height: 1;
+    border: none;
+    background: $wm-panel;
+    color: $wm-text;
+    content-align: left middle;
+    text-align: left;
+    text-style: none;
+    padding: 0 1;
+}
+.section-menu Button:hover { background: $wm-hover; color: $wm-accent; }
+.section-menu Button:focus { background: $wm-selected; color: $wm-accent; text-style: bold; }
+.section-menu Button.-active { background: $wm-accent; color: $wm-bg; }
+.section-menu Button:disabled { color: $wm-disabled; text-style: none; opacity: 80%; }
+.section-menu #menu-close { color: $wm-muted; }
+Tooltip { background: $wm-panel; color: $wm-text; border: round $wm-border; }
+Screen.-compact #search { height: 1; border: none; margin-bottom: 1; }
+Screen.-compact SectionHeader { height: 1; border-bottom: none; }

@@ -139,6 +139,71 @@ class RealTmuxTests(unittest.TestCase):
                     os.close(slave)
                     run(["tmux", "kill-session", "-t", "=" + tmux.session(workspace)])
 
+    def test_close_only_private_panes_of_selected_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            sockets = root / "sockets"
+            sockets.mkdir(mode=0o700)
+            with patch.dict(os.environ, {"TMUX_TMPDIR": str(sockets)}):
+                os.environ.pop("TMUX", None)
+                service = Service(
+                    Config(work_root=root / "work", source_root=root, state=root / "state")
+                )
+                workspace = service.create("close-terminal")
+                tmux = Tmux()
+                try:
+                    run(
+                        [
+                            "tmux",
+                            "-f",
+                            "/dev/null",
+                            "new-session",
+                            "-d",
+                            "-s",
+                            "close-test-anchor",
+                            "sleep",
+                            "120",
+                        ]
+                    )
+                    survivor = tmux.new(workspace, command=["sleep", "120"])
+                    selected = tmux.new(workspace, command=["sleep", "120"], split=True)
+                    foreign = run(
+                        [
+                            "tmux",
+                            "new-session",
+                            "-dP",
+                            "-F",
+                            "#{pane_id}",
+                            "-s",
+                            "foreign",
+                            "sleep 120",
+                        ]
+                    )
+                    with self.assertRaisesRegex(Error, "no longer available"):
+                        tmux.close(workspace, foreign)
+                    run(
+                        [
+                            "tmux",
+                            "link-window",
+                            "-s",
+                            foreign,
+                            "-t",
+                            "=" + tmux.session(workspace) + ":",
+                        ]
+                    )
+                    with self.assertRaisesRegex(Error, "no longer private"):
+                        tmux.close(workspace, foreign)
+                    tmux.close(workspace, selected)
+                    self.assertEqual(
+                        {pane["pane"] for pane in tmux.list(workspace)}, {survivor, foreign}
+                    )
+                    self.assertEqual(
+                        run(["tmux", "list-panes", "-t", "foreign", "-F", "#{pane_id}"]), foreign
+                    )
+                finally:
+                    with contextlib.suppress(Error):
+                        run(["tmux", "kill-server"])
+
     def test_persistent_isolated_processes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -221,6 +286,12 @@ class WizardTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     await app.workers.wait_for_complete()
                     self.assertEqual(app.query_one("#repos", DataTable).row_count, 1)
+                    selected_workspace = app.query_one("#workspaces", DataTable)
+                    self.assertEqual(
+                        selected_workspace.ordered_rows[selected_workspace.cursor_row].key.value,
+                        app.current,
+                    )
+                    self.assertEqual(app.selected().name, "wizard")
                     self.assertEqual(
                         service.status("wizard")["repos"]["repo"]["branch"], "wizard-branch"
                     )
@@ -229,7 +300,11 @@ class WizardTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     self.assertIsInstance(app.screen, Settings)
                     app.screen.query_one("#global-agent", Select).value = "codex"
-                    app.screen.query_one("#workspace-agent", Select).value = "claude"
+                    workspace_agent = app.screen.query_one("#workspace-agent", Select)
+                    workspace_agent.focus()
+                    await pilot.press("enter", "up", "enter")
+                    self.assertIn(workspace_agent.value, {"inherit", "shell", "claude", "codex"})
+                    workspace_agent.value = "claude"
                     app.screen.query_one("#save", Button).press()
                     await pilot.pause()
                     self.assertIsInstance(app.screen, Confirm)
