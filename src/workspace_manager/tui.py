@@ -1383,7 +1383,7 @@ class Manager(App[None]):
                     self.message(
                         f"Terminal started in {workspace.name}; select that workspace to attach."
                     )
-                    self.action_refresh()
+                    await self.refresh_after_operation()
                     return
                 self.attach(pane)
                 if launcher.last_warnings:

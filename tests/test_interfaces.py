@@ -279,7 +279,7 @@ class WizardTests(unittest.IsolatedAsyncioTestCase):
                     app.screen.query_one("#preview", Button).press()
                     for _ in range(40):
                         await pilot.pause(0.05)
-                        if isinstance(app.screen, Confirm):
+                        if isinstance(app.screen, Confirm) and app.screen.query("#confirm"):
                             break
                     self.assertIsInstance(app.screen, Confirm)
                     app.screen.query_one("#confirm", Button).press()

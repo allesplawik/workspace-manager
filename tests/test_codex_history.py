@@ -218,6 +218,7 @@ class HistoryUITests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch("workspace_manager.tui.CodexHistory.list", side_effect=history),
                 patch("workspace_manager.tui.AI.launch", return_value="%7") as launch,
+                patch("workspace_manager.providers.CodexProvider.available", return_value=True),
                 patch.object(app, "attach") as attach,
             ):
                 async with app.run_test(size=(120, 65)) as pilot:
@@ -241,6 +242,7 @@ class HistoryUITests(unittest.IsolatedAsyncioTestCase):
                     app.query_one("#conversations", DataTable).focus()
                     await pilot.press("enter")
                     await app.workers.wait_for_complete()
+                    launch.assert_called_once()
                     self.assertEqual(launch.call_args.kwargs["session_id"], ID_A)
                     self.assertEqual(launch.call_args.args[3], Path(workspace.path) / "repo")
                     attach.assert_called_once_with("%7")
