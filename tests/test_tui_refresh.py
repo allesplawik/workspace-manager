@@ -242,22 +242,22 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 patch("workspace_manager.tui.CodexHistory.list", side_effect=history),
             ):
-                async with app.run_test(size=(120, 65)):
+                async with app.run_test(size=(120, 65)) as pilot:
                     await app.workers.wait_for_complete()
                     app.select_history(Path(first.path))
                     await app.workers.wait_for_complete()
                     self.assertTrue(app.history_rows)
                     block = True
                     table = app.query_one("#workspaces", DataTable)
-                    event = DataTable.RowSelected(table, 1, table.ordered_rows[1].key)
-                    selection = asyncio.create_task(app.on_data_table_row_selected(event))
-                    await asyncio.wait_for(started.wait(), 2)
+                    table.move_cursor(row=table.get_row_index(second.id))
+                    table.action_select_cursor()
                     try:
+                        await asyncio.wait_for(started.wait(), 2)
                         self.assertEqual(app.history_workspace, second.id)
                         self.assertEqual(app.query_one("#repos", DataTable).row_count, 0)
                         self.assertEqual(app.query_one("#terminals", DataTable).row_count, 0)
                         self.assertNotEqual(app.history_cwd, Path(first.path))
                     finally:
                         release.set()
-                        await selection
+                        await pilot.pause()
                     self.assertEqual(app.query_one("#repos", DataTable).row_count, 0)

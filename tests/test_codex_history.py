@@ -218,6 +218,7 @@ class HistoryUITests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch("workspace_manager.tui.CodexHistory.list", side_effect=history),
                 patch("workspace_manager.tui.AI.launch", return_value="%7") as launch,
+                patch("workspace_manager.providers.CodexProvider.available", return_value=True),
                 patch.object(app, "attach") as attach,
             ):
                 async with app.run_test(size=(120, 65)) as pilot:
@@ -231,7 +232,7 @@ class HistoryUITests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app.query_one("#conversations", DataTable).row_count, 1)
                     from textual.widgets import Button
 
-                    self.assertFalse(app.query_one("#history-native", Button).display)
+                    self.assertTrue(app.query_one("#history-native", Button).display)
                     repos = app.query_one("#repos", DataTable)
                     repos.scroll_visible(animate=False)
                     await pilot.pause()
@@ -241,6 +242,7 @@ class HistoryUITests(unittest.IsolatedAsyncioTestCase):
                     app.query_one("#conversations", DataTable).focus()
                     await pilot.press("enter")
                     await app.workers.wait_for_complete()
+                    launch.assert_called_once()
                     self.assertEqual(launch.call_args.kwargs["session_id"], ID_A)
                     self.assertEqual(launch.call_args.args[3], Path(workspace.path) / "repo")
                     attach.assert_called_once_with("%7")
@@ -316,12 +318,16 @@ class HistoryUITests(unittest.IsolatedAsyncioTestCase):
                     app.current = workspace.id
                     app.select_history(cwd)
                     await app.workers.wait_for_complete()
-                    app.query_one("#history-more", Button).press()
+                    app.dispatch("history-more")
                     await pilot.pause()
                     await app.workers.wait_for_complete()
                     self.assertEqual(history.call_args.args, (cwd, "older"))
                     self.assertEqual(app.query_one("#conversations", DataTable).row_count, 2)
-                    self.assertTrue(app.query_one("#history-more", Button).disabled)
+                    self.assertTrue(
+                        next(
+                            a for a in app.section_actions("history") if a.id == "history-more"
+                        ).disabled
+                    )
                     history.side_effect = Error("Unavailable: native picker available")
                     app.query_one("#history-refresh", Button).press()
                     await pilot.pause()
@@ -329,7 +335,10 @@ class HistoryUITests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn(
                         "Unavailable", str(app.query_one("#history-label", Label).render())
                     )
-                    self.assertFalse(app.query_one("#history-native", Button).disabled)
+                    self.assertEqual(
+                        app.query_one("#history-native", Button).disabled,
+                        not __import__("shutil").which("codex"),
+                    )
                     self.assertTrue(app.query_one("#history-native", Button).display)
                     app.resume_history(None)
                     self.assertTrue(await asyncio.to_thread(started.wait, 2))
@@ -342,8 +351,11 @@ class HistoryUITests(unittest.IsolatedAsyncioTestCase):
                     history.return_value = HistoryPage([], None)
                     app.select_history(cwd)
                     await app.workers.wait_for_complete()
-                    self.assertFalse(app.query_one("#history-native", Button).display)
-                    self.assertTrue(app.query_one("#history-native", Button).disabled)
+                    self.assertTrue(app.query_one("#history-native", Button).display)
+                    self.assertEqual(
+                        app.query_one("#history-native", Button).disabled,
+                        not __import__("shutil").which("codex"),
+                    )
 
     async def test_native_picker_modes_follow_provider(self):
         from textual.widgets import Select

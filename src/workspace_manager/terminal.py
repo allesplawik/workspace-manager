@@ -157,6 +157,28 @@ class Tmux:
         run(["tmux", "set-option", "-p", "-t", pane, "@wm_kind", kind])
         return pane
 
+    def close(self, workspace: Workspace, pane: str) -> None:
+        with self.lock(workspace):
+            if pane not in {item["pane"] for item in self.list(workspace)}:
+                raise Error("Panel is no longer available in this workspace")
+            # Check and close in the same tmux command queue so a linked window
+            # cannot be closed through a different session.
+            blocked = "Terminal is no longer private to this workspace"
+            output = run(
+                [
+                    "tmux",
+                    "if-shell",
+                    "-F",
+                    "-t",
+                    pane,
+                    "#{==:#{window_linked_sessions_list}," + self.session(workspace) + "}",
+                    f"kill-pane -t {pane}",
+                    f"display-message -p '{blocked}'",
+                ]
+            )
+            if output:
+                raise Error(output)
+
     def attach(self, workspace: Workspace, pane: str | None = None) -> None:
         if not self.exists(workspace):
             self.new(workspace)
