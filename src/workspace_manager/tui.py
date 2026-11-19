@@ -1456,8 +1456,8 @@ class Manager(App[None]):
                 except (Error, OSError, ValueError) as exc:
                     self.message(f"Global settings saved. Workspace settings failed: {exc}")
                     return
+                await self.refresh_after_operation()
                 self.message("Global and workspace agent settings saved.")
-                self.action_refresh()
         except (Error, OSError, ValueError) as exc:
             self.message(str(exc))
 
