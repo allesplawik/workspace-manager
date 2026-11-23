@@ -414,6 +414,17 @@ def test_default_wm_shows_home_and_preserves_workspace_processes(monkeypatch):
             )
             assert_active(first_key, first)
             active = display.pane("active")
+            # Leave the detached display pane behind while its tmux client is
+            # still holding the workspace view lock.
+            with patch.object(display, "kill_viewer"):
+                display.detach_view(workspace, first)
+            assert display.pane("active") == home
+            assert display.exclusive_client(active, workspace) is not None
+            display.present(workspace, first)
+            assert_active(first_key, first)
+            assert display.pane("active") != active
+            assert run(["tmux", "display-message", "-p", "-t", first, "#{pane_pid}"]) == pid
+            active = display.pane("active")
             with display.lock():
                 viewer_client = display.exclusive_client(active, workspace)
                 assert viewer_client is not None

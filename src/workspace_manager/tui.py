@@ -19,6 +19,7 @@ from textual import work
 from textual.app import App, ComposeResult, SuspendNotSupported
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
@@ -439,7 +440,7 @@ def ui_operation(method: Callable[..., Any]) -> Callable[..., Any]:
 
 
 class Manager(App[None]):
-    TITLE = "Workspace Manager 2.0"
+    TITLE = "Workspace Manager 3.0"
     CSS_PATH = Path(__file__).with_name("dashboard.tcss")
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("question_mark", "help", "Help", key_display="?"),
@@ -470,6 +471,7 @@ class Manager(App[None]):
         *,
         presenter: Callable[..., None] | None = None,
         displayed: Callable[[], str | None] | None = None,
+        displayed_state: Callable[[], tuple[str, str] | None] | None = None,
         detach_view: Callable[..., None] | None = None,
         tab_request: Callable[[], str] | None = None,
         tab_names: Callable[[dict[str, list[dict[str, str]]]], None] | None = None,
@@ -477,6 +479,8 @@ class Manager(App[None]):
         super().__init__()
         self.presenter = presenter
         self.displayed = displayed
+        self.displayed_state = displayed_state
+        self.active_identity: str | None = None
         self.detach_view = detach_view
         self.tab_request = tab_request
         self.tab_names = tab_names
@@ -485,6 +489,7 @@ class Manager(App[None]):
         self.presentation_cancel = threading.Event()
         self.active_view: str | None = None
         self.last_sidebar_warning: str | None = None
+        self.warned_parallel_workspaces: set[str] = set()
         self.sidebar_message_details: str | None = None
         self.session_rows: dict[str, dict[str, str]] = {}
         self.selected_worktree: tuple[str, str] | None = None
@@ -824,7 +829,7 @@ class Manager(App[None]):
                     and self.details_workspace == self.current
                     and self.selected_key("terminals") is not None
                     and idle,
-                    "Close the selected panel after confirmation",
+                    "End a terminal created and verified by this version of WM, after confirmation",
                 ),
             ]
             if self.sessions:
@@ -836,7 +841,9 @@ class Manager(App[None]):
                         "Detach",
                         idle
                         and self.detach_view is not None
-                        and self.active_view == f"{self.current}/{key}",
+                        and self.is_displayed_terminal(
+                            f"{self.current}/{key}", self.session_rows.get(key or "", {})
+                        ),
                         "Return to the home shell and keep the process running",
                     ),
                     action(
@@ -1072,7 +1079,7 @@ class Manager(App[None]):
             chosen,
         )
 
-    def open_menu(self, section: str) -> None:
+    def open_menu(self, section: str, *, row_y: int | None = None) -> None:
         if self.dialog_busy or self.history_resuming:
             return
         if isinstance(self.screen, SectionMenu):
@@ -1092,7 +1099,8 @@ class Manager(App[None]):
                 "terminal-details",
                 "terminal-detach",
             }:
-                return (self.current, self.selected_key("terminals"))
+                pane = self.selected_key("terminals")
+                return (self.current, pane, self.session_rows.get(pane or "", {}).get("identity"))
             if action in {"history-resume", "history-details", "history-rename"}:
                 return (self.history_revision, self.selected_key("conversations"))
             if section == "history":
@@ -1114,10 +1122,14 @@ class Manager(App[None]):
                 return
             self.dispatch(action)
 
-        anchor = self.query_one(
-            "#sidebar-menu" if self.explorer else "#" + section + "-menu", Button
+        anchor = (
+            self.sessions
+            if row_y is not None
+            else self.query_one(
+                "#sidebar-menu" if self.explorer else "#" + section + "-menu", Button
+            )
         )
-        self.push_screen(SectionMenu(section.title(), actions, anchor), chosen)
+        self.push_screen(SectionMenu(section.title(), actions, anchor, row_y=row_y), chosen)
 
     def action_open(self) -> None:
         focused = self.focused
@@ -1235,14 +1247,12 @@ class Manager(App[None]):
         else:
             widget.update(value)
 
-    def launch_warning(self, message: str) -> None:
+    def launch_warning(self, message: str, workspace_id: str) -> None:
         if self.explorer:
             self.last_sidebar_warning = message
-            self.notify(
-                "Other agents are running in this workspace. See Last warning.",
-                severity="warning",
-                timeout=5,
-            )
+            if workspace_id not in self.warned_parallel_workspaces:
+                self.warned_parallel_workspaces.add(workspace_id)
+                self.notify("Agents share this workspace.", severity="warning", timeout=3)
         else:
             self.message("Warning: " + message)
             self.notify(message, severity="warning", timeout=10)
@@ -1372,23 +1382,51 @@ class Manager(App[None]):
                 result[key] = self.workspace_sessions[key]
             self.workspace_sessions = result
 
+    def observed_terminal(self) -> tuple[str | None, str | None]:
+        if self.displayed_state is not None:
+            return self.displayed_state() or (None, None)
+        return (self.displayed() if self.displayed is not None else None), None
+
+    def is_displayed_terminal(self, key: str, row: dict[str, str]) -> bool:
+        return self.active_view == key and (
+            self.active_identity is None or row.get("identity") == self.active_identity
+        )
+
+    @staticmethod
+    def displayed_peers(
+        workspace: Workspace, pane: str, identity: str | None
+    ) -> list[dict[str, str]]:
+        backend = Tmux()
+        if identity is not None:
+            backend = backend.scoped(workspace, pane, identity)
+        return backend.list(workspace)
+
     @work(group="active-display")
     async def refresh_active_view(self) -> None:
-        if self.displayed is None or self.tab_polling:
+        if (self.displayed is None and self.displayed_state is None) or self.tab_polling:
             return
         self.tab_polling = True
         try:
-            active = await asyncio.to_thread(self.displayed)
-            if active != self.active_view:
+            observed = await asyncio.to_thread(self.observed_terminal)
+            active, identity = observed
+            if observed != (self.active_view, self.active_identity):
                 if active and self.tab_request is not None:
                     owner, pane = active.split("/", 1)
                     workspace = self.values.get(owner)
                     if workspace is None:
                         return  # Initial registry refresh may still be running.
-                    peers = await asyncio.to_thread(Tmux().list, workspace)
-                    if await asyncio.to_thread(self.displayed) != active:
+                    peers = await asyncio.to_thread(self.displayed_peers, workspace, pane, identity)
+                    if await asyncio.to_thread(self.observed_terminal) != observed:
                         return
-                    row = next((item for item in peers if item["pane"] == pane), None)
+                    row = next(
+                        (
+                            item
+                            for item in peers
+                            if item["pane"] == pane
+                            and (identity is None or item.get("identity") == identity)
+                        ),
+                        None,
+                    )
                     if row is not None:
                         repo = self.session_worktree(workspace, row.get("start") or row["cwd"])
                         worktree = repo.name if repo else None
@@ -1400,11 +1438,11 @@ class Manager(App[None]):
                                 with self.prevent(Input.Changed):
                                     self.query_one("#search", Input).value = ""
                                 await self.refresh_after_operation()
-                            if await asyncio.to_thread(self.displayed) != active:
+                            if await asyncio.to_thread(self.observed_terminal) != observed:
                                 return
-                            self.active_view = active
+                            self.active_view, self.active_identity = observed
                             await self.activate_explorer((owner, worktree))
-                            if await asyncio.to_thread(self.displayed) != active:
+                            if await asyncio.to_thread(self.observed_terminal) != observed:
                                 return
                             if self.explorer is not None:
                                 node = next(
@@ -1423,13 +1461,15 @@ class Manager(App[None]):
                                     self.explorer.call_after_refresh(
                                         self.explorer.move_cursor, node
                                     )
-                self.active_view = active
+                self.active_view, self.active_identity = observed
                 self.update_dashboard()
                 if active is None:
                     self.action_refresh(False)
                 if active and self.sessions is not None:
                     pane = active.split("/", 1)[1]
-                    if any(option.id == pane for option in self.sessions.options):
+                    if self.is_displayed_terminal(active, self.session_rows.get(pane, {})) and any(
+                        option.id == pane for option in self.sessions.options
+                    ):
                         self.sessions.highlighted = self.sessions.get_option_index(pane)
             if self.tab_names is not None:
                 await asyncio.to_thread(self.tab_names, self.workspace_sessions.copy())
@@ -1515,7 +1555,7 @@ class Manager(App[None]):
                 "ended"
                 if pane["dead"] == "1"
                 else "connected"
-                if key == self.active_view
+                if self.is_displayed_terminal(key, pane)
                 else "live"
             )
             active = "● " if state == "connected" else ""
@@ -1534,9 +1574,11 @@ class Manager(App[None]):
     async def action_all_conversations(self) -> None:
         owners_by_path: dict[Path, set[str]] = {}
         scope_options = []
+        registered: dict[str, Workspace] = {}
         for workspace in await asyncio.to_thread(self.service.list):
             if workspace.phase != "ready":
                 continue
+            registered[workspace.id] = workspace
             root = Path(workspace.path)
             locations = {root}
             sources: dict[str, set[Path]] = {}
@@ -1582,34 +1624,56 @@ class Manager(App[None]):
             if choice.action == "claude":
                 cwd = choice.cwd
                 owners = owners_by_path.get(cwd, set()) if cwd is not None else set()
-                if cwd is None or len(owners) != 1:
+                if cwd is None or len(owners) != 1 or not cwd.is_dir():
                     self.message("Select a registered location for the Claude picker")
                     return
-                self.history_resuming = True
-                self.launch_history(next(iter(owners)), cwd, None, "claude", True)
+                owner = next(iter(owners))
+                tool, identifier = "claude", None
+            elif choice.item is None:
                 return
-            if choice.item is None:
-                return
-            item = choice.item
-            owners = (
-                owners_by_path.get(item.cwd, set())
-                if item.cwd is not None and item.cwd.is_dir()
-                else set()
-            )
-            if len(owners) == 1 and item.cwd is not None:
-                cwd, owner = item.cwd, next(iter(owners))
             else:
-                workspace = self.selected()
-                cwd = context or Path(workspace.path)
-                owner = workspace.id
-                if not await self.push_screen_wait(
-                    Confirm(
-                        f"Original location is unavailable. Resume in {cwd}?", focus_cancel=True
+                item = choice.item
+                owners = (
+                    owners_by_path.get(item.cwd, set())
+                    if item.cwd is not None and item.cwd.is_dir()
+                    else set()
+                )
+                if len(owners) == 1 and item.cwd is not None:
+                    cwd, owner = item.cwd, next(iter(owners))
+                else:
+                    if active_location is None or selected_workspace is None:
+                        self.message(
+                            "Select a workspace before resuming an unassigned conversation"
+                        )
+                        return
+                    cwd, owner = active_location, selected_workspace.id
+                    if not await self.push_screen_wait(
+                        Confirm(
+                            f"Original location is unavailable. Resume in {cwd}?", focus_cancel=True
+                        )
+                    ):
+                        continue
+                tool, identifier = "codex", item.id
+            previous = registered.get(owner)
+            current = await asyncio.to_thread(self.service.get, owner)
+            root = Path(current.path)
+            if (
+                previous is None
+                or current.path != previous.path
+                or current.phase != "ready"
+                or not cwd.is_dir()
+                or (
+                    cwd != root
+                    and not any(
+                        repo.phase == "ready" and root / repo.name == cwd and repo in previous.repos
+                        for repo in current.repos
                     )
-                ):
-                    continue
+                )
+            ):
+                self.message("Conversation location changed; reopen history and select it again")
+                return
             self.history_resuming = True
-            self.launch_history(owner, cwd, item.id, "codex", True)
+            self.launch_history(current, cwd, identifier, tool, True)
             return
 
     def refresh_compact_sidebar(self) -> None:
@@ -1629,12 +1693,15 @@ class Manager(App[None]):
             for repo in workspace.repos:
                 path = Path(workspace.path) / repo.name
                 live_panes = [
-                    pane["pane"]
+                    pane
                     for pane in sessions
                     if pane["dead"] == "0"
                     and Path(pane.get("start") or pane["cwd"]).is_relative_to(path)
                 ]
-                current = any(self.active_view == f"{workspace.id}/{pane}" for pane in live_panes)
+                current = any(
+                    self.is_displayed_terminal(f"{workspace.id}/{pane['pane']}", pane)
+                    for pane in live_panes
+                )
                 branch = states.get(repo.name, {}).get("branch") or repo.branch or repo.name
                 groups.setdefault(repo.source, []).append(
                     (repo.name, branch, bool(live_panes), current)
@@ -1699,14 +1766,25 @@ class Manager(App[None]):
         pane_rows = []
         for row in terminals.ordered_rows:
             pane, command, cwd, dead, kind = terminals.get_row(row.key)
-            active = self.active_view == f"{self.current}/{pane}" and dead == "0"
             metadata = self.session_rows.get(pane, {})
+            active = dead == "0" and self.is_displayed_terminal(f"{self.current}/{pane}", metadata)
             repo_name, branch = self.session_context(metadata.get("start") or cwd)
             name = session_display_name(
                 metadata or {"kind": kind, "command": command, "pane": pane, "cwd": cwd},
             )
             state = "ended" if dead == "1" else "connected" if active else "live"
-            pane_rows.append(SessionCard(pane, name, repo_name, branch, state, active))
+            pane_rows.append(
+                SessionCard(
+                    pane,
+                    name,
+                    repo_name,
+                    branch,
+                    state,
+                    active,
+                    self.current,
+                    metadata.get("identity"),
+                )
+            )
         self.sessions.show_cards(tuple(pane_rows))
         self.sync_tree(
             self.conversations,
@@ -1809,6 +1887,19 @@ class Manager(App[None]):
         except (Error, OSError, ValueError) as exc:
             self.message(str(exc))
 
+    def on_session_cards_menu_requested(self, event: SessionCards.MenuRequested) -> None:
+        card = event.card
+        if (
+            self.current != card.workspace
+            or self.session_rows.get(card.pane, {}).get("identity") != card.identity
+        ):
+            return
+        try:
+            self.select_compact_row("terminal", card.pane)
+            self.open_menu("terminal", row_y=event.screen_y)
+        except Error as exc:
+            self.message(str(exc))
+
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
         if event.option_list is self.sessions:
             try:
@@ -1826,7 +1917,10 @@ class Manager(App[None]):
 
     def select_compact_row(self, section: str, key: str | None) -> None:
         table_id = "terminals" if section == "terminal" else "conversations"
-        table = self.query_one("#" + table_id, DataTable)
+        try:
+            table = self.query_one("#" + table_id, DataTable)
+        except NoMatches as exc:
+            raise Error("Selection is no longer available") from exc
         if key is None or not any(row.key.value == key for row in table.ordered_rows):
             raise Error("Selection is no longer available")
         table.move_cursor(row=table.get_row_index(key), scroll=False)
@@ -2100,24 +2194,26 @@ class Manager(App[None]):
             return
         if identifier is not None and identifier not in self.history_rows:
             return
+        workspace = self.values.get(workspace_id)
+        if workspace is None:
+            return
         self.history_resuming = True
         self.update_dashboard()
-        self.launch_history(workspace_id, cwd, identifier)
+        self.launch_history(workspace, cwd, identifier)
 
     @work(group="history-resume")
     async def launch_history(
         self,
-        workspace_id: str,
+        workspace: Workspace,
         cwd: Path,
         identifier: str | None,
         tool: str = "codex",
         global_resume: bool = False,
     ) -> None:
         try:
-            workspace = await asyncio.to_thread(self.service.get, workspace_id)
 
             def warn(message: str) -> None:
-                self.call_from_thread(self.launch_warning, message)
+                self.call_from_thread(self.launch_warning, message, workspace.id)
 
             launcher = AI(self.service.config, on_warning=warn)
             pane = await asyncio.to_thread(
@@ -2128,6 +2224,7 @@ class Manager(App[None]):
                 cwd,
                 True,
                 session_id=identifier,
+                verify_history_location=True,
             )
             if global_resume and self.presenter is not None:
                 self.present_terminal(workspace, pane, expected=launcher.last_identity)
@@ -2141,7 +2238,7 @@ class Manager(App[None]):
                 self.attach(pane, expected=launcher.last_identity)
             if launcher.last_warnings and not self.explorer:
                 self.message("Warning: " + " ".join(launcher.last_warnings))
-            if self.history_workspace == workspace_id and self.history_cwd == cwd:
+            if self.history_workspace == workspace.id and self.history_cwd == cwd:
                 self.select_history(cwd)
         except (Error, OSError, ValueError) as exc:
             self.message(str(exc))
@@ -2333,20 +2430,33 @@ class Manager(App[None]):
             pane = self.selected_key("terminals")
             if pane is None or self.details_workspace != workspace.id:
                 raise Error("Select a terminal first")
+            identity = self.session_rows.get(pane, {}).get("identity")
             backend = Tmux()
             selected = await asyncio.to_thread(
                 backend.termination_identity,
                 workspace,
                 pane,
-                self.session_rows.get(pane, {}).get("identity"),
+                identity,
             )
             confirm = Confirm(
-                f"Close terminal {pane} in {workspace.name}? "
-                "This terminates the process running in that panel.",
+                f"Terminate terminal {pane} in {workspace.name}? "
+                "This ends the process running in that panel.",
                 focus_cancel=True,
             )
             if await self.push_screen_wait(confirm):
                 await asyncio.to_thread(backend.close, workspace, pane, expected=selected)
+
+                def survives(row: dict[str, str]) -> bool:
+                    return row["pane"] != pane or row.get("identity") != identity
+
+                if workspace.id in self.workspace_sessions:
+                    self.workspace_sessions[workspace.id] = list(
+                        filter(survives, self.workspace_sessions[workspace.id])
+                    )
+                if self.current == self.details_workspace == workspace.id:
+                    self.publish_sessions(
+                        workspace, list(filter(survives, self.session_rows.values()))
+                    )
                 await self.refresh_after_operation()
                 self.message(f"Terminal {pane} closed.")
         except (Error, OSError, ValueError) as exc:
@@ -2371,7 +2481,7 @@ class Manager(App[None]):
             if options:
 
                 def warn(message: str) -> None:
-                    self.call_from_thread(self.launch_warning, message)
+                    self.call_from_thread(self.launch_warning, message, workspace.id)
 
                 launcher = AI(self.service.config, on_warning=warn)
                 self.message("Opening terminal...")

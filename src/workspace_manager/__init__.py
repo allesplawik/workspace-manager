@@ -1,1 +1,1 @@
-"""Workspace Manager 2.0."""
+"""Workspace Manager 3.0."""

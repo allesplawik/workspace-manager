@@ -99,6 +99,14 @@ for line in sys.stdin:
             [r["method"] for r in requests], ["initialize", "initialized", "thread/list"]
         )
 
+    def test_group_signal_denial_does_not_mask_history_server_exit(self):
+        with (
+            self.stub("import sys; sys.stdin.readline(); sys.exit(1)"),
+            patch("workspace_manager.codex_history.os.killpg", side_effect=PermissionError),
+            self.assertRaisesRegex(Error, "history service stopped"),
+        ):
+            CodexHistory().list(self.root)
+
     def test_timeout_and_output_limit(self):
         for body, timeout, cap, message in (
             ("import time; time.sleep(30)\n", 0.1, 4096, "timed out"),

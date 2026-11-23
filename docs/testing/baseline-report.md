@@ -71,3 +71,9 @@ Wyniki po WM-T01 i WM-T02 są osobnymi przebiegami tego worktree. [WM-T01](wm-t0
 Pełny przebieg po wznowieniu WM-T02.1 dał 159 testów i 30 subtestów PASS na macOS Intel oraz Ubuntu 24.04 w Dockerze. Ruff, formatowanie i mypy przeszły na obu platformach.
 
 [WM-T03](wm-t03-worktree-lifecycle.md) rozszerza regresję o zmianę brancha i awarie zapisów. Oba środowiska ukończyły 166 testów i 30 subtestów.
+
+[WM-T04](wm-t04-session-tabs.md) zweryfikowano na macOS Intel i Ubuntu 24.04 w Dockerze. Na każdym środowisku przeszło 167 testów i 30 subtestów.
+
+[WM-T05](wm-t05-history-resume.md) rozszerza testy o historię, resume i weryfikację worktree. Pełne przebiegi przed końcową poprawką zamykania Textual dały po 173 testy i 30 subtestów PASS na macOS Intel z tmux 3.8 oraz Ubuntu 24.04 w Dockerze z tmux 3.4. Ruff, formatowanie i mypy przeszły na obu platformach. Po poprawce test spóźnionego podświetlenia przeszedł na obu platformach, a na macOS przeszło także siedem wybranych testów UI. Autoryzowane smoke rzeczywistych rozmów pozostają otwarte.
+
+[WM-T06](wm-t06-launchers.md) zweryfikowano z tego samego wheel `3.0.0.dev0` w czystych środowiskach macOS Intel 15.8.3 z tmux 3.8 i Ubuntu 24.04 Docker z tmux 3.4. Na obu platformach PASS dla CLI, Bash i Zsh `wmcd`, trzech interaktywnych wejść w PTY oraz ukierunkowanej regresji routingu i powrotu po zamknięciu shella (3 testy, 5 subtestów). To dowód deweloperski przed walidacją właściwego RC.

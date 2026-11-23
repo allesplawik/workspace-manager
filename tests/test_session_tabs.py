@@ -51,7 +51,7 @@ def test_unreachable_backend_only_drops_confirmed_exited_process(monkeypatch, tm
 def test_replacement_backend_keeps_tab_if_recorded_process_may_be_alive(monkeypatch, tmp_path):
     from workspace_manager.split import Display
 
-    monkeypatch.setattr("workspace_manager.split.run", lambda *_: "%0 900/901/902 0")
+    monkeypatch.setattr("workspace_manager.split.run", lambda *_: "%0 100/901/902 0 900")
     monkeypatch.setattr("workspace_manager.split.os.kill", lambda *_: None)
     old = {"owner/%0": ("100/200/300", "Shell")}
     assert Display(tmp_path).live_tabs(old) == old

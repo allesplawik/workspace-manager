@@ -118,6 +118,7 @@ class Display:
             marker = self.root / "owner"
             if marker.is_symlink() or (marker.exists() and not marker.is_file()):
                 raise Error("Invalid display owner marker")
+            recovering = marker.exists()
             nonce = secrets.token_hex(16)
             marker.write_text(nonce + "\n")
             sidebar = self.tmux(
@@ -161,6 +162,11 @@ class Display:
                 self.set("active", home)
                 self.bindings()
                 self.initialize_tabs()
+                if recovering:
+                    self.set(
+                        "tab_request",
+                        "error:Display server was restarted; reopen a verified terminal from Sessions.",
+                    )
                 self.tmux("select-pane", "-t", home)
                 self.reflow()
             except BaseException:
@@ -296,19 +302,19 @@ class Display:
                             "list-panes",
                             "-a",
                             "-F",
-                            "#{pane_id} #{pid}/#{session_created}/#{pane_pid} #{pane_dead}",
+                            "#{pane_id} #{pid}/#{session_created}/#{pane_pid} #{pane_dead} #{start_time}",
                         ]
                     ).splitlines()
                 )
         living: set[tuple[str, str]] = set()
         ended: set[tuple[str, str]] = set()
-        servers = set()
+        servers: dict[str, int] = {}
         for line in lines:
             fields = line.split()
-            if len(fields) != 3 or fields[2] not in {"0", "1"}:
+            if len(fields) != 4 or fields[2] not in {"0", "1"} or not fields[3].isdigit():
                 continue
-            pane, identity, dead = fields
-            servers.add(identity.split("/", 1)[0])
+            pane, identity, dead, started = fields
+            servers[identity.split("/", 1)[0]] = int(started)
             (living if dead == "0" else ended).add((pane, identity))
 
         retained = {}
@@ -317,15 +323,18 @@ class Display:
             pane = key.rsplit("/", 1)[1]
             if (pane, identity) in living:
                 retained[key] = data
-            elif (pane, identity) not in ended and identity.split("/", 1)[0] not in servers:
-                # A replacement server is as ambiguous as a missing socket.
+            elif (pane, identity) not in ended:
+                # A recycled server PID cannot prove that the old panel exited.
                 try:
-                    pid = int(identity.rsplit("/", 1)[1])
-                    if pid > 0:
-                        os.kill(pid, 0)
+                    server, created, pid = identity.split("/")
+                    server_start = servers.get(server)
+                    if server_start is not None and server_start <= int(created):
+                        continue
+                    if int(pid) > 0:
+                        os.kill(int(pid), 0)
                 except ProcessLookupError:
                     continue
-                except (IndexError, OSError, ValueError):
+                except (OSError, ValueError):
                     pass
                 retained[key] = data
         return retained
@@ -351,16 +360,10 @@ class Display:
                 owner, pane = key.split("/")
                 peers = snapshots.get(owner, [])
                 row = next((item for item in peers if item["pane"] == pane), None)
-                if row and row.get("dead") == "0":
+                if row and row.get("dead") == "0" and row.get("identity") == identity:
                     title = session_display_name(row)
                     if title != name:
-                        with contextlib.suppress(Error, OSError):
-                            workspace = Service().get(owner)
-                            if (
-                                Tmux().scoped(workspace, pane, identity).pane_identity(pane)
-                                == identity
-                            ):
-                                updated[key] = (identity, title)
+                        updated[key] = (identity, title)
             if updated != tabs:
                 self.save_tabs(updated)
                 self.render_tabs()
@@ -516,10 +519,33 @@ class Display:
             "-F",
             "-t",
             viewer,
-            "#{&&:#{==:#{pane_pid}," + birth + "},"
+            "#{&&:#{||:#{==:#{pane_pid}," + birth + "},"
+            "#{&&:#{pane_dead},#{==:#{@wm_display_viewer_pid}," + birth + "}}},"
             "#{==:#{window_linked_sessions_list}," + SESSION + "}}",
             "kill-pane -t " + viewer,
         )
+
+    def release_hidden_viewers(self, workspace_id: str, active: str) -> None:
+        # The display lock serializes presentation. A matching hidden viewer
+        # with a recorded birth is left over from an earlier presentation.
+        rows = self.tmux(
+            "list-panes",
+            "-s",
+            "-t",
+            TARGET,
+            "-F",
+            "#{pane_id} #{window_name} #{@wm_display_view} #{@wm_display_viewer_pid}",
+        )
+        for row in rows.splitlines():
+            pane, window, target, birth = (row.split(" ") + [""] * 4)[:4]
+            if (
+                pane != active
+                and re.fullmatch(r"%\d+", pane)
+                and window == "viewer"
+                and target.startswith(workspace_id + "/")
+                and birth.isdecimal()
+            ):
+                self.kill_viewer(pane, birth)
 
     def viewer_target(self, viewer: str) -> str:
         return self.info(viewer, "#{@wm_display_view}")
@@ -623,6 +649,10 @@ class Display:
             raise Error("This tab refers to a previous terminal")
         key = f"{workspace.id}/{pane}"
         tabs = self.tabs()
+        if key in tabs and tabs[key][0] != identity:
+            raise Error(
+                "Another backend uses this panel ID. Close its existing tab before opening this terminal."
+            )
         updated = {**tabs, key: (identity, session_display_name(row))}
 
         def publish() -> None:
@@ -663,6 +693,7 @@ class Display:
                     self.render_tabs()
                 raise
         else:
+            self.release_hidden_viewers(workspace.id, active)
             created = self.tmux(
                 "new-window",
                 "-dP",
@@ -718,6 +749,10 @@ class Display:
         )
 
     def displayed(self) -> str | None:
+        state = self.displayed_state()
+        return state[0] if state else None
+
+    def displayed_state(self) -> tuple[str, str] | None:
         with self.lock():
             self.check_owner()
             viewer = self.pane("active")
@@ -744,7 +779,7 @@ class Display:
             except (Error, OSError):
                 matches = False
             if matches and self.info(viewer, "#{pane_dead}") == "0":
-                return key
+                return key, expected
             self.release_view(viewer)
             return None
 
@@ -868,6 +903,7 @@ def main() -> None:
                 Service(),
                 presenter=display.present,
                 displayed=display.displayed,
+                displayed_state=display.displayed_state,
                 detach_view=display.detach_view,
                 tab_request=display.take_tab_request,
                 tab_names=display.update_tab_names,

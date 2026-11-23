@@ -5,14 +5,16 @@ import tempfile
 import threading
 import unittest
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 from rich.style import Style
 from textual import events
-from textual.widgets import Button, DataTable, Footer, Input, Select, Static
+from textual.css.query import NoMatches
+from textual.widgets import Button, DataTable, Footer, Input, OptionList, Select, Static
 
-from workspace_manager.codex_history import Conversation, HistoryPage
+from workspace_manager.codex_history import CodexHistory, Conversation, HistoryPage
 from workspace_manager.context_views import GlobalSessions, HistoryBrowser, HistoryChoice
 from workspace_manager.conversation_titles import ConversationTitles
 from workspace_manager.core import Config, Error, Service, run
@@ -25,6 +27,7 @@ from workspace_manager.dashboard import (
     SessionCards,
     WorkspaceExplorer,
 )
+from workspace_manager.terminal import AI, Tmux
 from workspace_manager.tui import AddRepo, Confirm, Create, Launch, Manager
 
 ID = "12345678-1234-1234-1234-123456789abc"
@@ -270,6 +273,29 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(app.selected_worktree)
             self.assertEqual(app.history_cwd, Path(workspace.path))
 
+    async def test_session_card_menu_targets_clicked_row_without_opening_terminal(self):
+        async with dashboard(integrated=True, size=(28, 48)) as (app, pilot, _, workspace, attach):
+            await select_workspace(app, workspace)
+            cards = app.query_one(SessionCards)
+            cards.scroll_visible(animate=False)
+            await pilot.pause()
+            menu_column = cards.scrollable_content_region.width - 2
+            await pilot.click("#session-list", offset=(menu_column, 2))
+            await pilot.pause()
+            self.assertEqual(app.selected_key("terminals"), "%2")
+            self.assertEqual(cards.highlighted_option.id, "%2")
+            self.assertTrue(app.screen.query_one("#terminal-details", Button).is_mounted)
+            attach.assert_not_called()
+            app.session_rows["%2"] = {**app.session_rows["%2"], "identity": "replacement"}
+            with patch.object(app, "dispatch") as dispatch:
+                app.screen.query_one("#terminal-details", Button).press()
+                await pilot.pause()
+                dispatch.assert_not_called()
+            self.assertIn("Selection changed", str(app.query_one("#message", Static).render()))
+            await pilot.click("#session-list", offset=(2, 0))
+            await pilot.pause()
+            attach.assert_called_once_with("%1")
+
     async def test_premium_cards_resize_and_keep_visible_state(self):
         async with dashboard(integrated=True, size=(50, 18), many_sessions=True) as (
             app,
@@ -324,7 +350,22 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(app.query_one("#" + key, Button).display)
             self.assertFalse(app.query_one("#history-label").display)
             self.assertEqual(app.query_one("#memory-open", Button).label.plain, "Workspace Memory")
-            app.launch_warning("Concurrent AI sessions may modify the same files: example")
+            with patch.object(app, "notify") as notify:
+                app.launch_warning(
+                    "Concurrent AI sessions may modify the same files: first", workspace.id
+                )
+                app.launch_warning(
+                    "Concurrent AI sessions may modify the same files: example", workspace.id
+                )
+                notify.assert_called_once()
+                app.launch_warning(
+                    "Concurrent AI sessions may modify the same files: other", "other"
+                )
+                self.assertEqual(notify.call_count, 2)
+                app.launch_warning(
+                    "Concurrent AI sessions may modify the same files: example", workspace.id
+                )
+                self.assertEqual(notify.call_count, 2)
             self.assertNotIn("Concurrent AI", str(app.query_one("#message", Static).render()))
             app.clear_notifications()
             await pilot.click("#sidebar-menu")
@@ -339,7 +380,7 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
             app.screen.query_one("#sidebar-warning", Button).press()
             await pilot.pause()
             self.assertIsInstance(app.screen, Information)
-            self.assertIn("Concurrent AI", app.screen.content)
+            self.assertIn("files: example", app.screen.content)
             await pilot.press("escape")
             full = "Concurrent AI sessions may modify the same files. Blocked by configured conflict_policy."
             app.message(full)
@@ -518,6 +559,56 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(first.title, "Same title")
 
+    async def test_global_history_filters_two_pages_without_dropping_unassigned(self):
+        list_history = CodexHistory.list
+        async with dashboard(integrated=True) as (app, pilot, _service, workspace, _attach):
+            alpha = Path(workspace.path) / "alpha"
+            beta = Path(workspace.path) / "beta"
+            first = {"id": ID, "cwd": str(alpha), "name": "Alpha"}
+            second = {"id": ID[:-1] + "d", "cwd": str(beta), "name": "Beta"}
+            unknown = {"id": ID[:-1] + "e", "cwd": None, "name": "Unassigned"}
+            with (
+                patch.object(CodexHistory, "list", list_history),
+                patch(
+                    "workspace_manager.context_views.CodexHistory._request",
+                    side_effect=[
+                        {"data": [first, unknown], "nextCursor": "next"},
+                        {"data": [first, second], "nextCursor": None},
+                    ],
+                ) as request,
+            ):
+                app.action_all_conversations()
+                await pilot.pause()
+                browser = app.screen
+                scope = browser.query_one("#history-scope", Select)
+                scope.value = ""
+                listing = browser.query_one("#browser-rows")
+                for _ in range(20):
+                    if listing.option_count == 2:
+                        break
+                    await pilot.pause(0.05)
+                self.assertEqual(listing.option_count, 2)
+                browser.query_one("#browser-more", Button).press()
+                for _ in range(20):
+                    if listing.option_count == 3:
+                        break
+                    await pilot.pause(0.05)
+                self.assertEqual(listing.option_count, 3)
+                self.assertEqual(
+                    [call.args[1]["cursor"] for call in request.call_args_list], [None, "next"]
+                )
+                for path, row in ((alpha, first), (beta, second)):
+                    scope.value = str(path)
+                    await pilot.pause()
+                    self.assertEqual(listing.option_count, 1)
+                    self.assertEqual(listing.get_option_at_index(0).id, row["id"])
+                scope.value = ""
+                await pilot.pause()
+                self.assertEqual(listing.option_count, 3)
+                self.assertIsNotNone(listing.get_option(unknown["id"]))
+                await pilot.press("escape")
+                await app.workers.wait_for_complete()
+
     async def test_global_resume_keeps_original_id_after_rename(self):
         async with dashboard(integrated=True) as (app, _pilot, service, workspace, _attach):
             target = Path(workspace.path) / "beta"
@@ -536,8 +627,89 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
             ):
                 app.action_all_conversations()
                 await app.workers.wait_for_complete()
-                launch.assert_called_once_with(workspace.id, target, ID, "codex", True)
+                launch.assert_called_once_with(workspace, target, ID, "codex", True)
             self.assertEqual(ConversationTitles(service).read()["codex:" + ID], "pinned title")
+
+    async def test_cancel_unassigned_or_missing_codex_location_does_not_launch(self):
+        async with dashboard(integrated=True) as (app, _pilot, _service, workspace, _attach):
+            fallback = Path(workspace.path) / "alpha"
+            await app.activate_explorer((workspace.id, "alpha"))
+            for cwd in (None, Path(workspace.path) / "missing"):
+                item = Conversation(ID, "Original", cwd, 42, "idle")
+                with (
+                    patch.object(
+                        app,
+                        "push_screen_wait",
+                        side_effect=[HistoryChoice("resume", item), False, None],
+                    ) as prompt,
+                    patch.object(app, "launch_history") as launch,
+                ):
+                    app.action_all_conversations()
+                    await app.workers.wait_for_complete()
+                    confirmation = prompt.call_args_list[1].args[0]
+                    self.assertIsInstance(confirmation, Confirm)
+                    self.assertIn(str(fallback), confirmation.message)
+                    launch.assert_not_called()
+
+    async def test_claude_picker_refuses_missing_registered_location(self):
+        async with dashboard(integrated=True) as (app, _pilot, _service, workspace, _attach):
+            target = Path(workspace.path) / "beta"
+            target.rename(target.with_name("moved-beta"))
+            with (
+                patch.object(
+                    app, "push_screen_wait", return_value=HistoryChoice("claude", cwd=target)
+                ),
+                patch.object(app, "launch_history") as launch,
+                patch.object(app, "message") as message,
+            ):
+                app.action_all_conversations()
+                await app.workers.wait_for_complete()
+                launch.assert_not_called()
+                message.assert_called_once()
+
+    async def test_history_refuses_worktree_replaced_while_browser_is_open(self):
+        async with dashboard(integrated=True) as (app, _pilot, service, workspace, _attach):
+            target = Path(workspace.path) / "beta"
+            changed = replace(
+                workspace,
+                repos=[
+                    replace(repo, generation="replacement") if repo.name == "beta" else repo
+                    for repo in workspace.repos
+                ],
+            )
+            with (
+                patch.object(service, "get", return_value=changed),
+                patch.object(
+                    app, "push_screen_wait", return_value=HistoryChoice("claude", cwd=target)
+                ),
+                patch.object(app, "launch_history") as launch,
+                patch.object(app, "message") as message,
+            ):
+                app.action_all_conversations()
+                await app.workers.wait_for_complete()
+                launch.assert_not_called()
+                message.assert_called_once_with(
+                    "Conversation location changed; reopen history and select it again"
+                )
+
+    async def test_launcher_refuses_replaced_history_target_before_allocating_pane(self):
+        async with dashboard(integrated=True) as (_app, _pilot, service, workspace, _attach):
+            target = Path(workspace.path) / "beta"
+            stale = replace(
+                workspace,
+                repos=[
+                    replace(repo, generation="stale") if repo.name == "beta" else repo
+                    for repo in workspace.repos
+                ],
+            )
+            with (
+                patch.object(Tmux, "_new") as new,
+                self.assertRaisesRegex(Error, "Conversation location changed"),
+            ):
+                AI(service.config).launch(
+                    stale, "claude", "resume", target, verify_history_location=True
+                )
+            new.assert_not_called()
 
     async def test_claude_picker_uses_location_selected_in_history(self):
         async with dashboard(integrated=True) as (app, pilot, _service, workspace, _attach):
@@ -557,7 +729,7 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 app.screen.query_one("#browser-claude", Button).press()
                 await app.workers.wait_for_complete()
-                launch.assert_called_once_with(workspace.id, target, None, "claude", True)
+                launch.assert_called_once_with(workspace, target, None, "claude", True)
 
     async def test_closing_history_during_load_keeps_dashboard_running(self):
         async with dashboard(integrated=True) as (app, pilot, _service, _workspace, _attach):
@@ -596,6 +768,11 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
             await app.refresh_active_view().wait()
             self.assertEqual(app.selected_worktree, (workspace.id, "alpha"))
             self.assertEqual(app.active_view, f"{workspace.id}/%2")
+            # A highlight may be queued before the backing table is unmounted.
+            cards = app.query_one(SessionCards)
+            event = OptionList.OptionHighlighted(cards, cards.get_option_at_index(0), 0)
+            with patch.object(app, "query_one", side_effect=NoMatches("#terminals")):
+                app.on_option_list_option_highlighted(event)
 
     async def test_failed_presentation_preserves_observed_session_and_allows_retry(self):
         async with dashboard(integrated=True) as (app, _pilot, _service, workspace, _attach):
@@ -818,6 +995,7 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
     async def test_close_terminal_requires_confirmation(self):
         async with dashboard() as (app, pilot, _service, workspace, _attach):
             await select_workspace(app, workspace)
+            target = app.selected_key("terminals")
             with (
                 patch("workspace_manager.tui.Tmux.close") as close,
                 patch("workspace_manager.tui.Tmux.termination_identity", return_value="birth"),
@@ -834,9 +1012,49 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         await pilot.click("#confirm")
                     await app.workers.wait_for_complete()
-                close.assert_called_once_with(
-                    workspace, app.selected_key("terminals"), expected="birth"
+                close.assert_called_once_with(workspace, target, expected="birth")
+
+    async def test_session_card_terminate_confirms_and_uses_the_selected_panel(self):
+        async with dashboard(integrated=True, size=(36, 48)) as (app, pilot, _, workspace, _):
+            await select_workspace(app, workspace)
+            cards = app.query_one(SessionCards)
+            cards.scroll_visible(animate=False)
+            await pilot.pause()
+            with (
+                patch("workspace_manager.tui.Tmux.close") as close,
+                patch(
+                    "workspace_manager.tui.Tmux.termination_identity", return_value="birth"
+                ) as verify,
+            ):
+                await pilot.click(
+                    "#session-list", offset=(cards.scrollable_content_region.width - 2, 0)
                 )
+                await pilot.click("#terminal-close")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, Confirm)
+                self.assertEqual(app.focused.id, "cancel")
+                verify.assert_called_once_with(workspace, "%1", None)
+                close.assert_not_called()
+                await pilot.click("#confirm")
+                await app.workers.wait_for_complete()
+                close.assert_called_once_with(workspace, "%1", expected="birth")
+
+    async def test_terminated_session_disappears_even_when_backend_refresh_fails(self):
+        async with dashboard(integrated=True) as (app, pilot, _, workspace, _):
+            await select_workspace(app, workspace)
+            with (
+                patch("workspace_manager.tui.Tmux.close"),
+                patch("workspace_manager.tui.Tmux.termination_identity", return_value="birth"),
+                patch.object(
+                    app, "refresh_after_operation", side_effect=Error("Backend unavailable")
+                ),
+            ):
+                app.dispatch("terminal-close")
+                await pilot.pause()
+                await pilot.click("#confirm")
+                await app.workers.wait_for_complete()
+                self.assertEqual([card.pane for card in app.query_one(SessionCards).cards], ["%2"])
+                self.assertEqual([r["pane"] for r in app.workspace_sessions[workspace.id]], ["%2"])
 
     async def test_close_refuses_unverified_pane_without_opening_confirmation(self):
         async with dashboard() as (app, _pilot, _service, workspace, _attach):

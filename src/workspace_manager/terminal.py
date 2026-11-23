@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
@@ -155,15 +156,21 @@ class Tmux:
 
     @staticmethod
     def socket_absent(socket: Path) -> bool:
-        if socket.is_symlink():
-            return False
-        if not socket.exists():
+        try:
+            info = socket.lstat()
+        except (FileNotFoundError, NotADirectoryError):
             return True
+        except OSError:
+            return False
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+            return False
         try:
             server_identity(socket)
         except Error as exc:
-            return any(
-                word in str(exc).lower() for word in ("no server running", "connection refused")
+            message = str(exc).lower()
+            return message.startswith("no server running on ") or (
+                message.startswith("error connecting to ")
+                and message.endswith("(connection refused)")
             )
         return False
 
@@ -240,9 +247,22 @@ class Tmux:
     def list(self, workspace: Workspace) -> builtins.list[dict[str, str]]:
         if not shutil.which("tmux"):
             return []
-        selected = self.scoped(workspace)
-        if selected is not self:
-            return selected.list(workspace)
+        try:
+            selected = self.scoped(workspace)
+            if selected is not self:
+                return selected.list(workspace)
+        except Error:
+            if self.socket is None:
+                entries = BackendStore(workspace).read()["backends"]
+                if len(entries) == 1:
+                    entry = entries[0]
+                    if self.socket_absent(Path(entry["socket"])) and self.can_retire_missing(
+                        workspace, entry
+                    ):
+                        # The final panel can shut down the server. This is an
+                        # empty view; backend verification and metadata stay intact.
+                        return []
+            raise
         if not self.exists(workspace):
             return []
         output = run(
@@ -313,7 +333,15 @@ class Tmux:
         store = BackendStore(workspace)
         exists = self.exists(workspace)
         if not any(entry["socket"] == str(socket) for entry in store.read()["backends"]):
-            identity = server_identity(socket) if socket.exists() else None
+            identity = None
+            if socket.exists() or socket.is_symlink():
+                try:
+                    identity = server_identity(socket)
+                except Error:
+                    if not self.socket_absent(socket):
+                        raise
+                    # A stopped server can leave its socket behind. tmux
+                    # replaces the inactive socket when starting a new server.
             store.upsert(socket, identity, "wm")
             if identity is not None and self.server is None:
                 # Pin this operation, including a new session on an existing server.
@@ -584,6 +612,8 @@ class Tmux:
             raise Error("Terminal changed after selection")
         if state.linked:
             raise Error("Terminal is no longer private to this workspace")
+        if state.category == Ownership.MANAGED:
+            raise Error("Legacy terminal. Exit it in its tab.")
         if state.category != Ownership.OWNED:
             raise Error("Panel is no longer available for termination: ownership is unverified")
         return state.birth
@@ -889,6 +919,8 @@ class AI:
         split: bool = False,
         extra_args: builtins.list[str] | None = None,
         session_id: str | None = None,
+        *,
+        verify_history_location: bool = False,
     ) -> str:
         tool = tool or workspace.default_agent or self.config.default_agent
         selected = provider(tool)
@@ -908,6 +940,13 @@ class AI:
         self.last_identity = None
         with tmux.lock(workspace):
             workspace.require_registered()
+            if verify_history_location:
+                current = Service(self.config).read(workspace)
+                if desired != root and not any(
+                    repo.phase == "ready" and root / repo.name == desired and repo in current.repos
+                    for repo in workspace.repos
+                ):
+                    raise Error("Conversation location changed; reopen history and select it again")
             tmux = tmux.for_new(workspace)
             panes = tmux.list(workspace)
             if not fresh:

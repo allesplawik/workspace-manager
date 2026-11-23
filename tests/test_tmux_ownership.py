@@ -47,8 +47,9 @@ def test_owned_managed_external_and_replaced_panels(owned_server):
     run([*BACKEND, "set-option", "-pu", "-t", second, "@wm_pane_owner"])
     assert backend.inspect_pane(workspace, second).category == Ownership.MANAGED
     backend.rename(workspace, second, "Legacy observation")
-    with pytest.raises(Error, match="ownership"):
+    with pytest.raises(Error, match="Legacy terminal"):
         backend.close(workspace, second, expected=second_birth)
+    assert backend.pane_identity(second) == "/".join(second_birth.split("/")[:3])
 
     external = run(
         [

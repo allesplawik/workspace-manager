@@ -40,6 +40,38 @@ class CLITests(unittest.TestCase):
                 status = runner.invoke(app, ["workspace", "status", "sample"])
                 self.assertEqual(json.loads(status.output)["workspace"]["name"], "sample")
 
+    def test_default_launcher_routing_preserves_classic_and_subcommands(self):
+        from types import SimpleNamespace
+
+        from workspace_manager.cli import root, split_workspace
+
+        for stdin_tty, stdout_tty, classic, subcommand, expected in (
+            (True, True, False, None, "integrated"),
+            (True, True, True, None, "classic"),
+            (False, True, False, None, "classic"),
+            (True, False, False, None, "classic"),
+            (True, True, False, "workspace", None),
+        ):
+            with (
+                self.subTest(stdin=stdin_tty, stdout=stdout_tty, classic=classic, cmd=subcommand),
+                patch("workspace_manager.cli.sys.stdin.isatty", return_value=stdin_tty),
+                patch("workspace_manager.cli.sys.stdout.isatty", return_value=stdout_tty),
+                patch("workspace_manager.cli.Config.load"),
+                patch("workspace_manager.cli.Service"),
+                patch("workspace_manager.split.Display.configured") as display,
+                patch("workspace_manager.tui.Manager") as manager,
+            ):
+                root(SimpleNamespace(invoked_subcommand=subcommand), classic)
+                self.assertEqual(display.return_value.attach.call_count, expected == "integrated")
+                self.assertEqual(manager.return_value.run.call_count, expected == "classic")
+
+        with (
+            patch("workspace_manager.cli.Config.load"),
+            patch("workspace_manager.split.Display.configured") as display,
+        ):
+            split_workspace()
+            display.return_value.attach.assert_called_once_with()
+
     def test_repo_switch_cli_requires_confirmation(self):
         from typer.testing import CliRunner
 

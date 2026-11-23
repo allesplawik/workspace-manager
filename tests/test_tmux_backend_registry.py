@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -75,6 +76,53 @@ def cli_args(*args):
         "terminal",
         *args,
     ]
+
+
+def test_terminating_final_panel_lists_empty_after_managed_server_exits(legacy_repo):
+    _, _, workspace = legacy_repo
+    backend = Tmux()
+    path = socket_directory() / "default"
+    pane = backend.new(workspace, command=["sleep", "90"])
+    try:
+        before = BackendStore(workspace).read()
+        backend.close(workspace, pane, expected=backend.termination_identity(workspace, pane))
+        assert backend.list(workspace) == []
+        assert BackendStore(workspace).read() == before
+    finally:
+        with contextlib.suppress(Error):
+            run(["tmux", "-S", str(path), "kill-server"])
+
+
+def test_first_workspace_terminal_recovers_from_stale_default_socket(legacy_repo):
+    _, _, workspace = legacy_repo
+    path = socket_directory() / "default"
+    path.parent.mkdir(mode=0o700)
+    with socket.socket(socket.AF_UNIX) as stale:
+        stale.bind(str(path))
+    assert path.is_socket()
+    worktree = Path(workspace.path) / "repo"
+    backend = Tmux()
+    try:
+        pane = backend.new(workspace, cwd=worktree, command=["sleep", "90"])
+        row = backend.list(workspace)[0]
+        assert (row["pane"], row["cwd"], row["dead"]) == (pane, str(worktree), "0")
+        assert backend.inspect_pane(workspace, pane).category == Ownership.OWNED
+        assert BackendStore(workspace).read()["backends"][0]["identity"] is not None
+    finally:
+        with contextlib.suppress(Error):
+            run(["tmux", "-S", str(path), "kill-server"])
+
+
+def test_first_workspace_terminal_refuses_non_socket_even_with_tmux_error_words(legacy_repo):
+    root, _, workspace = legacy_repo
+    path = root / "no server running" / "custom.sock"
+    path.parent.mkdir()
+    path.write_text("keep")
+    assert not Tmux.socket_absent(path)
+    with pytest.raises(Error, match="not a socket"):
+        Tmux(path).new(workspace, command=["sleep", "90"])
+    assert path.read_text() == "keep"
+    assert BackendStore(workspace).read()["backends"] == []
 
 
 def test_legacy_arbitrary_socket_is_fail_closed_then_discovered_without_adoption(legacy_repo):
@@ -272,3 +320,94 @@ def test_interrupted_pending_record_requires_explicit_live_backend_verification(
         assert rebound["id"] == pending["id"]
         assert rebound["identity"]
         assert Tmux().verify_terminals(workspace).state == Verification.CLEAR
+
+
+def test_split_collision_preserves_card_and_processes_across_sidebar_restart(
+    legacy_repo, monkeypatch
+):
+    import time
+
+    from workspace_manager.split import TARGET, Display
+
+    root, service, workspace = legacy_repo
+    source = Path(workspace.repos[0].source)
+    workspace = service.add(workspace.id, source, "another", "other-topic")
+    first_cwd = Path(workspace.path) / "repo"
+    other_cwd = Path(workspace.path) / "another"
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    sockets = [root / "first.sock", root / "second.sock"]
+    displays = Display(root / "display")
+
+    def wait_for_sidebar(text: str) -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if text in displays.tmux("capture-pane", "-p", "-t", displays.pane("sidebar")):
+                return
+            time.sleep(0.05)
+        pytest.fail(f"Sidebar did not show {text!r}")
+
+    with (
+        server(["tmux", "-S", str(sockets[0])], root),
+        server(["tmux", "-S", str(sockets[1])], root),
+    ):
+        records = [Tmux.register_backend(workspace, path) for path in sockets]
+        a, b = [Tmux.registered(record) for record in records]
+        store = BackendStore(workspace)
+        pane = a.new(workspace, cwd=first_cwd, command=["sleep", "90"])
+        sibling = a.new(workspace, cwd=other_cwd, command=["sleep", "90"])
+        assert b.new(workspace, cwd=other_cwd, command=["sleep", "90"]) == pane
+        identity_a, identity_b = a.pane_identity(pane), b.pane_identity(pane)
+        assert identity_a != identity_b
+        key = f"{workspace.id}/{pane}"
+        a.rename(workspace, pane, "Kept title")
+        b.rename(workspace, pane, "Different backend")
+        with Tmux().lock(workspace):
+            store.select(records[0]["id"])
+        try:
+            displays.prepare()
+            a.rename(workspace, sibling, "Kept title")
+            displays.present(workspace, sibling, expected=a.pane_identity(sibling))
+            wait_for_sidebar("source / other-topic")
+            displays.present(workspace, pane, expected=identity_a)
+            wait_for_sidebar("source / topic")
+            active = displays.pane("active")
+            sidebar = displays.pane("sidebar")
+            old_sidebar_pid = displays.info(sidebar, "#{pane_pid}")
+            with Tmux().lock(workspace):
+                store.select(records[1]["id"])
+            with pytest.raises(Error, match="Close its existing tab"):
+                displays.present(workspace, pane, expected=identity_b)
+            displays.update_tab_names({workspace.id: b.list(workspace)})
+            assert displays.tabs()[key] == (identity_a, "Shell · Kept title")
+            assert displays.pane("active") == active
+            assert displays.displayed_state() == (key, identity_a)
+
+            displays.tmux("respawn-pane", "-k", "-t", sidebar, *displays.command("sidebar"))
+            assert displays.info(sidebar, "#{pane_pid}") != old_sidebar_pid
+            wait_for_sidebar("source / topic")
+            assert displays.tabs()[key] == (identity_a, "Shell · Kept title")
+            assert displays.displayed_state() == (key, identity_a)
+
+            a.rename(workspace, pane, "")
+            displays.update_tab_names({workspace.id: a.list(workspace)})
+            assert displays.tabs()[key] == (identity_a, f"Shell {int(pane[1:]) + 1}")
+            displays.tab_action("close")
+            assert key not in displays.tabs()
+            displays.present(workspace, pane, expected=identity_b)
+            assert displays.displayed_state() == (key, identity_b)
+
+            # Simulate losing the private display server, not either terminal backend.
+            displays.tmux("kill-session", "-t", TARGET)
+            displays.prepare()
+            assert displays.displayed() is None
+            assert displays.pane("active") == displays.pane("home")
+            wait_for_sidebar("Display server was restarted")
+            displays.present(workspace, pane, expected=identity_b)
+            assert displays.displayed_state() == (key, identity_b)
+            wait_for_sidebar("source / other-topic")
+            assert a.pane_identity(pane) == identity_a
+            assert b.pane_identity(pane) == identity_b
+        finally:
+            with contextlib.suppress(Error), displays.lock():
+                displays.check_owner()
+                displays.tmux("kill-session", "-t", TARGET)

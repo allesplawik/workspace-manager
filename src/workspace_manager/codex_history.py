@@ -205,16 +205,26 @@ class CodexHistory:
             selector.close()
             with contextlib.suppress(OSError):
                 stdin.close()
+
             # The private short-lived service must not outlive this metadata request.
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGTERM)
+            def stop_group(signum: signal.Signals) -> None:
+                try:
+                    os.killpg(process.pid, signum)
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    # On macOS a group whose leader is exiting may reject a group signal.
+                    # Popen signals the leader only if it has not already exited.
+                    with contextlib.suppress(PermissionError):
+                        process.send_signal(signum)
+
+            stop_group(signal.SIGTERM)
             try:
                 process.wait(timeout=0.2)
             except subprocess.TimeoutExpired:
                 pass
             # A leader can exit before descendants that ignore TERM. Escalate for
             # the whole private group even when the leader was already reaped.
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
+            stop_group(signal.SIGKILL)
             process.wait()
             stdout.close()

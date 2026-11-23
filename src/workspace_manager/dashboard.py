@@ -367,10 +367,17 @@ class SessionCard:
     branch: str
     state: str
     active: bool
+    workspace: str | None = None
+    identity: str | None = None
 
 
 class SessionCards(OptionList):
     """Two lines per option, with native Textual keyboard and pointer handling."""
+
+    class MenuRequested(Message):
+        def __init__(self, card: SessionCard, screen_y: int) -> None:
+            super().__init__()
+            self.card, self.screen_y = card, screen_y
 
     def __init__(self) -> None:
         super().__init__(id="session-list", compact=True)
@@ -394,12 +401,21 @@ class SessionCards(OptionList):
         width = max(1, self.scrollable_content_region.width)
         title = Text(" ", style=palette["accent"])
         agent = Text(card.agent, style="bold")
-        agent.truncate(max(4, width - 16), overflow="ellipsis")
+        agent.truncate(max(4, width - 19), overflow="ellipsis")
         title.append_text(agent)
         title.append(f" · {card.repository}", style=palette["text"])
-        title.truncate(max(1, width - 2), overflow="ellipsis")
+        title.truncate(max(1, width - 3 - (2 if active else 0)), overflow="ellipsis")
         if active:
             title.append(" ●", style=palette["success"])
+        if width >= 6:
+            title.truncate(width - 2, overflow="ellipsis", pad=True)
+            title.append(
+                "⋯ ",
+                Style(
+                    color=palette["accent"],
+                    meta={"session_menu": (card.workspace, card.pane, card.identity)},
+                ),
+            )
         detail = Text("  ", style=palette["muted"])
         if card.branch:
             branch = Text(card.branch, style=palette["muted"])
@@ -412,6 +428,18 @@ class SessionCards(OptionList):
             if active:
                 line.stylize_before(f"on {palette['selected']}")
         return Text("\n", no_wrap=True, overflow="ellipsis").join((title, detail))
+
+    def on_click(self, event: events.Click) -> None:
+        target = event.style.meta.get("session_menu")
+        if event.button == 1 and isinstance(target, tuple):
+            event.prevent_default()
+            event.stop()
+            index = event.style.meta.get("option")
+            if isinstance(index, int) and 0 <= index < len(self.cards):
+                card = self.cards[index]
+                if target == (card.workspace, card.pane, card.identity):
+                    self.highlighted = index
+                    self.post_message(self.MenuRequested(card, event.screen_y))
 
     def on_resize(self) -> None:
         for index, card in enumerate(self.cards):
@@ -490,10 +518,16 @@ class SectionMenu(ModalScreen[str | None]):
     ]
 
     def __init__(
-        self, title: str, actions: tuple[SectionAction, ...], anchor: Widget | None = None
+        self,
+        title: str,
+        actions: tuple[SectionAction, ...],
+        anchor: Widget | None = None,
+        *,
+        row_y: int | None = None,
     ):
         super().__init__()
         self.title, self.actions, self.anchor_widget = title, actions, anchor
+        self.row_y = row_y
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(classes="section-menu"):
@@ -518,7 +552,11 @@ class SectionMenu(ModalScreen[str | None]):
         if self.anchor_widget is not None and self.anchor_widget.is_mounted:
             region = self.anchor_widget.region
             x = region.right - width
-            below, above = region.bottom, region.y - height
+            below, above = (
+                (self.row_y + 1, self.row_y - height)
+                if self.row_y is not None
+                else (region.bottom, region.y - height)
+            )
             y = below if below + height <= viewport.height else above
         else:
             x, y = (viewport.width - width) // 2, (viewport.height - height) // 2
