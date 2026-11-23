@@ -42,6 +42,21 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(params["sortKey"], "updated_at")
         self.assertTrue(params["useStateDbOnly"])
 
+    def test_global_page_keeps_conversations_without_a_location(self):
+        rows = [
+            {"id": ID_A, "cwd": str(self.root), "name": "Saved"},
+            {"id": ID_B, "cwd": None, "name": "Saved"},
+        ]
+        with patch.object(
+            CodexHistory, "_request", return_value={"data": rows, "nextCursor": "older"}
+        ) as request:
+            page = CodexHistory().list(None)
+        self.assertEqual(
+            [(item.id, item.cwd) for item in page.conversations], [(ID_A, self.root), (ID_B, None)]
+        )
+        self.assertEqual(page.next_cursor, "older")
+        self.assertNotIn("cwd", request.call_args.args[1])
+
     def test_invalid_metadata_and_repeated_cursor_fail_closed(self):
         for result in (
             {"data": "wrong"},

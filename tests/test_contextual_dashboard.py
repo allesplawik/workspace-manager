@@ -8,19 +8,30 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import patch
 
+from rich.style import Style
 from textual import events
-from textual.widgets import Button, DataTable, Footer, Input, Static
+from textual.widgets import Button, DataTable, Footer, Input, Select, Static
 
 from workspace_manager.codex_history import Conversation, HistoryPage
+from workspace_manager.context_views import GlobalSessions, HistoryBrowser, HistoryChoice
+from workspace_manager.conversation_titles import ConversationTitles
 from workspace_manager.core import Config, Error, Service, run
-from workspace_manager.dashboard import DashboardSection, Information, SectionHeader, SectionMenu
+from workspace_manager.dashboard import (
+    DashboardSection,
+    ExplorerTree,
+    Information,
+    SectionHeader,
+    SectionMenu,
+    SessionCards,
+    WorkspaceExplorer,
+)
 from workspace_manager.tui import AddRepo, Confirm, Create, Launch, Manager
 
 ID = "12345678-1234-1234-1234-123456789abc"
 
 
 @asynccontextmanager
-async def dashboard(*, filled=True, size=(110, 60), extra=0):
+async def dashboard(*, filled=True, size=(110, 60), extra=0, integrated=False, many_sessions=False):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory).resolve()
         service = Service(Config(root / "work", root, root / "state"))
@@ -65,7 +76,22 @@ async def dashboard(*, filled=True, size=(110, 60), extra=0):
                 else HistoryPage([], None)
             )
 
-        app = Manager(service)
+        if integrated:
+            panes[0].update(cwd=str(Path(workspace.path) / "alpha"), kind="codex")
+            panes[1].update(cwd=str(Path(workspace.path) / "beta"), kind="claude", dead="1")
+        if many_sessions:
+            panes[0]["name"] = "a-very-long-custom-name"
+            panes.extend(
+                {
+                    "pane": f"%{index}",
+                    "command": "sh",
+                    "cwd": workspace.path,
+                    "dead": "0",
+                    "kind": "shell",
+                }
+                for index in range(3, 10)
+            )
+        app = Manager(service, presenter=(lambda *_: None) if integrated else None)
         with (
             patch("workspace_manager.tui.Tmux.list", return_value=panes),
             patch("workspace_manager.tui.CodexHistory.list", side_effect=history),
@@ -95,6 +121,560 @@ async def select_workspace(app, workspace):
 
 
 class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_integrated_explorer_and_sessions_at_28_columns(self):
+        async with dashboard(integrated=True, size=(28, 34)) as (
+            app,
+            pilot,
+            _service,
+            workspace,
+            attach,
+        ):
+            explorer = app.query_one("#workspace-explorer", ExplorerTree)
+            sessions = app.query_one("#session-list", SessionCards)
+            self.assertFalse(app.query_one("#repo-section").display)
+            self.assertFalse(app.query_one("#history-section", DashboardSection).display)
+            self.assertTrue(app.query_one("#memory-open", Button).display)
+            self.assertFalse(app.query_one("#history-menu", Button).display)
+            self.assertTrue(app.query_one("#sidebar-menu", Button).display)
+            self.assertFalse(app.query_one("#terminals", DataTable).display)
+            workspace_node = explorer.root.children[0]
+            source_node = workspace_node.children[0]
+            worktree_node = source_node.children[0]
+            self.assertIn("sample", workspace_node.label.plain)
+            self.assertIn("source", source_node.label.plain)
+            self.assertIn("alpha-branch", worktree_node.label.plain)
+            explorer.move_cursor(workspace_node)
+            explorer.focus()
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertEqual(app.current, workspace.id)
+            self.assertEqual(explorer.visible_rows, 1)
+            await pilot.press("right")
+            await pilot.pause()
+            self.assertEqual(explorer.visible_rows, 4)
+            await pilot.click("#workspace-explorer", offset=(8, 1))
+            await pilot.pause()
+            self.assertEqual(explorer.visible_rows, 4)
+            self.assertEqual(explorer.cursor_node.data, source_node.data)
+            explorer.move_cursor(explorer.root.children[0])
+            branch = run(
+                ["git", "-C", str(Path(workspace.path) / "alpha"), "branch", "--show-current"]
+            )
+            await pilot.press("down", "down", "enter")
+            await pilot.pause()
+            self.assertEqual(app.selected_worktree, (workspace.id, "alpha"))
+            self.assertEqual(
+                run(["git", "-C", str(Path(workspace.path) / "alpha"), "branch", "--show-current"]),
+                branch,
+            )
+            node = explorer.root.children[0].children[0]
+            self.assertIn("•", node.children[0].label.plain)
+            explorer.move_cursor(node)
+            await pilot.press("d")
+            await app.workers.wait_for_complete()
+            self.assertNotIsInstance(app.screen, Confirm)
+            self.assertIn("Activate the workspace", str(app.query_one("#message", Static).render()))
+            explorer.move_cursor(node)
+            await pilot.press("left")
+            await pilot.pause()
+            self.assertEqual(explorer.visible_rows, 2)
+            self.assertEqual(explorer.size.height, 2)
+            await pilot.press("right")
+            await pilot.pause()
+            root = explorer.root.children[0]
+            source = root.children[0]
+            leaf = source.children[0]
+            for node, name in (
+                (root, "long-workspace-" * 8),
+                (source, "long-repository-" * 8 + " •"),
+                (leaf, "long-branch-" * 8 + " •"),
+            ):
+                node.set_label(name)
+                label = explorer.render_label(node, Style(), Style())
+                self.assertIn("…", label.plain)
+                if name.endswith(" •"):
+                    self.assertTrue(label.plain.endswith(" •"))
+                self.assertGreater(node.label.cell_len, label.cell_len)
+            self.assertEqual([card.pane for card in sessions.cards], ["%1"])
+            await select_workspace(app, workspace)
+            await pilot.pause()
+            self.assertEqual(sessions.cards[0].agent, "Codex 2")
+            self.assertEqual(sessions.cards[0].repository, "alpha")
+            self.assertEqual(sessions.cards[0].branch, "alpha-branch")
+            self.assertEqual(sessions.cards[1].state, "ended")
+            sessions.focus()
+            sessions.highlighted = 0
+            await pilot.press("enter")
+            attach.assert_called_once_with("%1")
+            await pilot.hover("#session-list", offset=(5, 2))
+            self.assertIsNone(sessions.tooltip)
+            self.assertEqual(sessions.highlighted_option.id, "%1")
+            await pilot.hover("#search")
+            self.assertIsNone(sessions.tooltip)
+            await pilot.press("down", "enter")
+            attach.assert_called_once()
+            await pilot.press("f10")
+            await pilot.pause()
+            self.assertIsInstance(app.screen, SectionMenu)
+            self.assertTrue(app.screen.query_one("#terminal-attach", Button).disabled)
+            self.assertFalse(app.screen.query_one("#terminal-details", Button).disabled)
+            self.assertEqual(
+                app.screen.query_one("#terminal-close", Button).label.plain, "Terminate"
+            )
+
+    async def test_integrated_add_focuses_new_worktree_and_launch_uses_it(self):
+        async with dashboard(integrated=True, size=(36, 34)) as (
+            app,
+            pilot,
+            service,
+            workspace,
+            _attach,
+        ):
+            await select_workspace(app, workspace)
+            repo = {
+                "source": service.config.source_root / "source",
+                "name": "gamma",
+                "branch": "gamma-branch",
+                "ref": "HEAD",
+                "new": True,
+            }
+            with patch.object(app, "push_screen_wait", side_effect=[repo, True]):
+                app.action_add()
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+            explorer = app.query_one("#workspace-explorer", ExplorerTree)
+            self.assertIs(app.focused, explorer)
+            self.assertEqual(explorer.cursor_node.data, (workspace.id, "gamma"))
+            self.assertEqual(app.selected_worktree, (workspace.id, "gamma"))
+            cwd = Path(workspace.path) / "gamma"
+            self.assertEqual(app.history_cwd, cwd)
+            with patch.object(app, "push_screen_wait", return_value=None) as launch:
+                app.action_new_terminal()
+                await app.workers.wait_for_complete()
+            dialog = launch.call_args.args[0]
+            self.assertIsInstance(dialog, Launch)
+            self.assertEqual(dialog.cwd, str(cwd))
+            app.dispatch("workspace-open")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            self.assertIsNone(app.selected_worktree)
+            self.assertEqual(app.history_cwd, Path(workspace.path))
+            group = explorer.root.children[0].children[0]
+            explorer.move_cursor(group.children[-1])
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertIsNotNone(app.selected_worktree)
+            explorer.move_cursor(group)
+            await pilot.press("enter")
+            await pilot.pause()
+            self.assertIsNone(app.selected_worktree)
+            self.assertEqual(app.history_cwd, Path(workspace.path))
+
+    async def test_premium_cards_resize_and_keep_visible_state(self):
+        async with dashboard(integrated=True, size=(50, 18), many_sessions=True) as (
+            app,
+            pilot,
+            _service,
+            workspace,
+            _attach,
+        ):
+            sessions = app.query_one("#session-list", SessionCards)
+            self.assertFalse(sessions.display)
+            branch = "feature/branch-name-that-does-not-fit"
+            with patch.object(
+                app, "session_context", return_value=("important-repository", branch)
+            ):
+                app.active_view = f"{workspace.id}/%1"
+                await select_workspace(app, workspace)
+                await pilot.pause()
+                sessions.focus()
+                await pilot.press("down")
+                self.assertEqual(sessions.highlighted_option.id, "%2")
+                self.assertEqual(sessions.size.height % 2, 0)
+                for width in (36, 28, 50):
+                    await pilot.resize_terminal(width, 18)
+                    await pilot.pause()
+                    prompt = sessions.get_option("%1").prompt
+                    self.assertEqual(len(prompt.plain.splitlines()), 2)
+                    self.assertIn("important", prompt.plain.splitlines()[0])
+                    self.assertIn("connected", prompt.plain.splitlines()[1])
+                    self.assertTrue(
+                        all(
+                            line.cell_len <= sessions.scrollable_content_region.width
+                            for line in prompt.split()
+                        )
+                    )
+                    self.assertEqual(sessions.highlighted_option.id, "%2")
+                    self.assertEqual(app.query_one("#session-status").region.bottom, 18)
+                await pilot.press("end")
+                self.assertEqual(sessions.highlighted_option.id, "%9")
+                self.assertEqual(sessions.cards[-1].branch, branch)
+
+    async def test_minimal_sidebar_keeps_actions_and_warning_accessible(self):
+        async with dashboard(integrated=True, size=(28, 34)) as (
+            app,
+            pilot,
+            _service,
+            workspace,
+            _attach,
+        ):
+            await select_workspace(app, workspace)
+            self.assertEqual(app.query_one("#search", Input).placeholder, "Search...")
+            for key in ("workspace-refresh", "terminal-attach", "history-native"):
+                self.assertFalse(app.query_one("#" + key, Button).display)
+            self.assertFalse(app.query_one("#history-label").display)
+            self.assertEqual(app.query_one("#memory-open", Button).label.plain, "Workspace Memory")
+            app.launch_warning("Concurrent AI sessions may modify the same files: example")
+            self.assertNotIn("Concurrent AI", str(app.query_one("#message", Static).render()))
+            app.clear_notifications()
+            await pilot.click("#sidebar-menu")
+            await pilot.pause()
+            self.assertIsInstance(app.screen, SectionMenu)
+            app.screen.query_one("#terminal-menu", Button).press()
+            await pilot.pause()
+            self.assertFalse(app.screen.query_one("#terminal-details", Button).disabled)
+            await pilot.press("escape")
+            await pilot.click("#sidebar-menu")
+            await pilot.pause()
+            app.screen.query_one("#sidebar-warning", Button).press()
+            await pilot.pause()
+            self.assertIsInstance(app.screen, Information)
+            self.assertIn("Concurrent AI", app.screen.content)
+            await pilot.press("escape")
+            full = "Concurrent AI sessions may modify the same files. Blocked by configured conflict_policy."
+            app.message(full)
+            message = app.query_one("#message", Static)
+            self.assertIn("Launch blocked by policy", str(message.render()))
+            self.assertIsNone(message.tooltip)
+            await pilot.click("#sidebar-menu")
+            await pilot.pause()
+            app.screen.query_one("#sidebar-message", Button).press()
+            await pilot.pause()
+            self.assertEqual(app.screen.content, full)
+
+    async def test_minimal_history_failure_does_not_claim_history_is_empty(self):
+        async with dashboard(integrated=True, size=(28, 32)) as (
+            app,
+            pilot,
+            _service,
+            workspace,
+            _attach,
+        ):
+            await select_workspace(app, workspace)
+            with patch("workspace_manager.tui.CodexHistory.list", side_effect=Error("Test error")):
+                await app.activate_explorer((workspace.id, "alpha"))
+                await app.workers.wait_for_complete()
+            await pilot.pause()
+            self.assertTrue(app.query_one("#history-label").display)
+            self.assertFalse(app.query_one("#history-empty").display)
+            anchor = app.query_one("#sidebar-menu", Button)
+            await pilot.click("#sidebar-menu")
+            await pilot.pause()
+            self.assertIsInstance(app.screen, SectionMenu)
+            await pilot.click(offset=(anchor.region.x + 1, anchor.region.y))
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, SectionMenu)
+
+    async def test_explorer_distinguishes_equal_names_and_state_after_resize(self):
+        async with dashboard(integrated=True, size=(28, 34)) as (
+            app,
+            pilot,
+            service,
+            workspace,
+            _attach,
+        ):
+            identical = service.create("source")
+            service.add(identical.id, service.config.source_root / "source", "source", "source")
+            await app.refresh_after_operation()
+            explorer = app.query_one("#workspace-explorer", WorkspaceExplorer)
+            group = next(node for node in explorer.root.children if node.data[0] == identical.id)
+            repo = group.children[0]
+            leaf = repo.children[0]
+            self.assertEqual(
+                [node.label.plain for node in (group, repo, leaf)],
+                ["◫ source", "◇ source", "⑂ source"],
+            )
+            with patch("workspace_manager.dashboard.sys.stdout") as output:
+                output.encoding = "ascii"
+                fallback = WorkspaceExplorer()
+                self.assertEqual(
+                    [fallback.type_icon(level) for level in (0, 1, 2)], ["W", "R", "Y"]
+                )
+            self.assertFalse(leaf.allow_expand)
+            await select_workspace(app, workspace)
+            group = next(node for node in explorer.root.children if node.data[0] == workspace.id)
+            group.expand()
+            await pilot.pause()
+            alpha, beta = group.children[0].children
+            await app.activate_explorer(beta.data)
+            app.active_view = f"{workspace.id}/%1"
+            app.update_dashboard()
+            await pilot.pause()
+            group = next(node for node in explorer.root.children if node.data[0] == workspace.id)
+            alpha, beta = group.children[0].children
+            self.assertIn("•", alpha.label.plain)
+            self.assertEqual(
+                alpha.label.get_style_at_offset(app.console, 2).color.triplet.hex, "#8ab4f8"
+            )
+            self.assertTrue(beta.label.get_style_at_offset(app.console, 2).underline)
+            explorer.focus()
+            explorer.move_cursor(group)
+            await pilot.pause()
+            for columns in (28, 36, 50):
+                await pilot.resize_terminal(columns, 34)
+                await pilot.pause()
+                self.assertEqual(explorer.cursor_node.data, group.data)
+                strip = explorer.render_line(explorer.cursor_line - explorer.scroll_offset.y)
+                self.assertEqual(
+                    {segment.style.bgcolor.triplet.hex for segment in strip}, {"#203149"}
+                )
+                self.assertLessEqual(explorer.virtual_size.width, explorer.size.width)
+
+    async def test_context_worktree_and_global_sessions_keep_separate_targets(self):
+        async with dashboard(integrated=True, size=(28, 28)) as (
+            app,
+            pilot,
+            service,
+            workspace,
+            _attach,
+        ):
+            await app.activate_explorer((workspace.id, "alpha"))
+            await app.workers.wait_for_complete()
+            sessions = app.query_one("#session-list", SessionCards)
+            self.assertEqual([card.pane for card in sessions.cards], ["%1"])
+            self.assertIn("source / alpha-branch", str(app.query_one("#worktree-context").render()))
+            self.assertTrue(app.query_one("#history-section").display)
+            await app.activate_explorer((workspace.id, "beta"))
+            await app.workers.wait_for_complete()
+            self.assertEqual(
+                [(card.pane, card.state) for card in sessions.cards], [("%2", "ended")]
+            )
+            other = service.create("other")
+            pane = {"pane": "%1", "kind": "shell", "command": "sh", "cwd": other.path, "dead": "0"}
+            with (
+                patch(
+                    "workspace_manager.tui.Tmux.list",
+                    side_effect=lambda owner: (
+                        [pane, {**pane, "pane": "%2", "name": "Named"}] if owner == other else []
+                    ),
+                ),
+                patch.object(app, "presenter") as present,
+            ):
+                app.action_all_sessions()
+                await pilot.pause()
+                self.assertIsInstance(app.screen, GlobalSessions)
+                self.assertEqual(app.screen.rows[0][0], f"{other.id}/%1")
+                self.assertIn("Shell %1", app.screen.rows[0][1])
+                self.assertIn("Shell %2", app.screen.rows[1][1])
+                self.assertIn("Named", app.screen.rows[1][1])
+                app.screen.query_one("#global-sessions").focus()
+                await pilot.press("enter")
+                await app.workers.wait_for_complete()
+                present.assert_called_once()
+                owner, target, is_current = present.call_args.args
+                self.assertEqual((owner, target), (other, "%1"))
+                self.assertTrue(is_current())
+            self.assertEqual(app.selected_worktree, (workspace.id, "beta"))
+
+    async def test_conversation_titles_and_unassigned_history(self):
+        async with dashboard(integrated=True, size=(36, 32)) as (
+            app,
+            pilot,
+            service,
+            workspace,
+            _attach,
+        ):
+            first = Conversation(ID, "Same title", Path(workspace.path) / "alpha", 42, "idle")
+            second = Conversation("other", "Same title", None, 40, "idle")
+            store = ConversationTitles(service)
+            store.set("codex", first.id, "A local title")
+            store.set("claude", first.id, "Different provider")
+            app.custom_titles = ConversationTitles(service).read()
+            self.assertEqual(app.conversation_title(first), "A local title")
+            self.assertEqual(app.conversation_title(second), "Same title")
+            with patch(
+                "workspace_manager.context_views.CodexHistory.list",
+                return_value=HistoryPage([first, second], None),
+            ):
+                app.action_all_conversations()
+                await pilot.pause()
+                self.assertIsInstance(app.screen, HistoryBrowser)
+                browser = app.screen
+                listing = browser.query_one("#browser-rows")
+                for _ in range(20):
+                    if listing.option_count == 2:
+                        break
+                    await pilot.pause(0.05)
+                self.assertEqual(listing.option_count, 2)
+                browser.query_one("#history-search", Input).value = "local"
+                await pilot.pause()
+                self.assertEqual(listing.option_count, 1)
+                self.assertEqual(listing.get_option_at_index(0).id, ID)
+                await pilot.press("escape")
+                await app.workers.wait_for_complete()
+            store.set("codex", first.id, "")
+            self.assertEqual(
+                ConversationTitles(service).read(), {"claude:" + first.id: "Different provider"}
+            )
+            self.assertEqual(first.title, "Same title")
+
+    async def test_global_resume_keeps_original_id_after_rename(self):
+        async with dashboard(integrated=True) as (app, _pilot, service, workspace, _attach):
+            target = Path(workspace.path) / "beta"
+            item = Conversation(ID, "Original", target, 42, "idle")
+            with (
+                patch.object(
+                    app,
+                    "push_screen_wait",
+                    side_effect=[
+                        HistoryChoice("rename", item),
+                        "pinned title",
+                        HistoryChoice("resume", item),
+                    ],
+                ),
+                patch.object(app, "launch_history") as launch,
+            ):
+                app.action_all_conversations()
+                await app.workers.wait_for_complete()
+                launch.assert_called_once_with(workspace.id, target, ID, "codex", True)
+            self.assertEqual(ConversationTitles(service).read()["codex:" + ID], "pinned title")
+
+    async def test_claude_picker_uses_location_selected_in_history(self):
+        async with dashboard(integrated=True) as (app, pilot, _service, workspace, _attach):
+            await app.activate_explorer((workspace.id, "alpha"))
+            with (
+                patch(
+                    "workspace_manager.context_views.CodexHistory.list",
+                    return_value=HistoryPage([], None),
+                ),
+                patch.object(app, "launch_history") as launch,
+            ):
+                app.action_all_conversations()
+                await pilot.pause()
+                target = Path(workspace.path) / "beta"
+                app.screen.query_one("#history-scope", Select).value = str(target)
+                app.screen.query_one("#history-agent", Select).value = "claude"
+                await pilot.pause()
+                app.screen.query_one("#browser-claude", Button).press()
+                await app.workers.wait_for_complete()
+                launch.assert_called_once_with(workspace.id, target, None, "claude", True)
+
+    async def test_closing_history_during_load_keeps_dashboard_running(self):
+        async with dashboard(integrated=True) as (app, pilot, _service, _workspace, _attach):
+            loading = threading.Event()
+            release = threading.Event()
+
+            def load(*_):
+                loading.set()
+                release.wait(timeout=3)
+                return HistoryPage([], None)
+
+            try:
+                with patch("workspace_manager.context_views.CodexHistory.list", side_effect=load):
+                    app.action_all_conversations()
+                    for _ in range(20):
+                        if loading.is_set():
+                            break
+                        await pilot.pause(0.05)
+                    self.assertTrue(loading.is_set())
+                    await pilot.press("escape")
+                    await pilot.pause()
+                    self.assertTrue(app.is_running)
+                    self.assertNotIsInstance(app.screen, HistoryBrowser)
+            finally:
+                release.set()
+
+    async def test_switching_displayed_tab_syncs_context_and_keeps_selection_independent(self):
+        async with dashboard(integrated=True) as (app, _pilot, _service, workspace, _attach):
+            await app.activate_explorer((workspace.id, "alpha"))
+            app.tab_request = lambda: ""
+            app.displayed = lambda: f"{workspace.id}/%2"
+            await app.refresh_active_view().wait()
+            self.assertEqual(app.selected_worktree, (workspace.id, "beta"))
+            self.assertEqual(app.history_cwd, Path(workspace.path) / "beta")
+            await app.activate_explorer((workspace.id, "alpha"))
+            await app.refresh_active_view().wait()
+            self.assertEqual(app.selected_worktree, (workspace.id, "alpha"))
+            self.assertEqual(app.active_view, f"{workspace.id}/%2")
+
+    async def test_failed_presentation_preserves_observed_session_and_allows_retry(self):
+        async with dashboard(integrated=True) as (app, _pilot, _service, workspace, _attach):
+            first = f"{workspace.id}/%1"
+            second = f"{workspace.id}/%2"
+            observed = first
+            app.displayed = lambda: observed
+            await app.refresh_active_view().wait()
+
+            with patch.object(app, "presenter", side_effect=Error("Attach failed")):
+                app.present_terminal(workspace, "%2")
+                await app.workers.wait_for_complete()
+            self.assertEqual(app.active_view, first)
+            self.assertIn("Attach failed", str(app.query_one("#message", Static).render()))
+
+            def present(*_):
+                nonlocal observed
+                observed = second
+
+            with patch.object(app, "presenter", side_effect=present):
+                app.present_terminal(workspace, "%2")
+                await app.workers.wait_for_complete()
+            await app.refresh_active_view().wait()
+            self.assertEqual(app.active_view, second)
+
+    async def test_presentation_worker_drops_superseded_pending_requests(self):
+        async with dashboard(integrated=True) as (app, _pilot, _service, workspace, _attach):
+            entered, release = threading.Event(), threading.Event()
+            seen = []
+
+            committed = []
+
+            def present(_workspace, pane, is_current):
+                seen.append(pane)
+                if len(seen) == 1:
+                    entered.set()
+                    release.wait(3)
+                if is_current():
+                    committed.append(pane)
+
+            with patch.object(app, "presenter", side_effect=present):
+                app.present_terminal(workspace, "%1")
+                try:
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                    for pane in ("%2", "%1", "%2", "%1"):
+                        app.present_terminal(workspace, pane)
+                finally:
+                    release.set()
+                await app.workers.wait_for_complete()
+            self.assertEqual(seen, ["%1", "%1"])
+            self.assertEqual(committed, ["%1"])
+
+    async def test_terminal_opening_message_clears_after_launch_result(self):
+        async with dashboard(integrated=True) as (app, pilot, _service, workspace, attach):
+            await select_workspace(app, workspace)
+            for outcome in ("%3", Error("Launch failed")):
+                entered, release = threading.Event(), threading.Event()
+
+                def launch(*_args, started=entered, ready=release, result=outcome, **_kwargs):
+                    started.set()
+                    ready.wait(3)
+                    if isinstance(result, Error):
+                        raise result
+                    return result
+
+                with patch("workspace_manager.tui.AI.launch", side_effect=launch):
+                    app.launch_ai("shell", True)
+                    await pilot.pause()
+                    app.screen.query_one("#launch", Button).press()
+                    try:
+                        self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                        self.assertEqual(app.sidebar_message_details, "Opening terminal...")
+                    finally:
+                        release.set()
+                    await app.workers.wait_for_complete()
+                expected = str(outcome) if isinstance(outcome, Error) else None
+                self.assertEqual(app.sidebar_message_details, expected)
+            attach.assert_called_once_with("%3")
+
     async def test_four_headers_counts_empty_and_context(self):
         async with dashboard() as (app, _pilot, _service, workspace, attach):
             self.assertEqual(len(app.query(SectionHeader)), 4)
@@ -238,7 +818,10 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
     async def test_close_terminal_requires_confirmation(self):
         async with dashboard() as (app, pilot, _service, workspace, _attach):
             await select_workspace(app, workspace)
-            with patch("workspace_manager.tui.Tmux.close") as close:
+            with (
+                patch("workspace_manager.tui.Tmux.close") as close,
+                patch("workspace_manager.tui.Tmux.termination_identity", return_value="birth"),
+            ):
                 for response in ("escape", "confirm"):
                     app.open_menu("terminal")
                     await pilot.pause()
@@ -251,7 +834,27 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         await pilot.click("#confirm")
                     await app.workers.wait_for_complete()
-                close.assert_called_once_with(workspace, app.selected_key("terminals"))
+                close.assert_called_once_with(
+                    workspace, app.selected_key("terminals"), expected="birth"
+                )
+
+    async def test_close_refuses_unverified_pane_without_opening_confirmation(self):
+        async with dashboard() as (app, _pilot, _service, workspace, _attach):
+            await select_workspace(app, workspace)
+            with (
+                patch("workspace_manager.tui.Tmux.close") as close,
+                patch(
+                    "workspace_manager.tui.Tmux.termination_identity",
+                    side_effect=Error("Ownership is unverified"),
+                ),
+            ):
+                app.dispatch("terminal-close")
+                await app.workers.wait_for_complete()
+                close.assert_not_called()
+                self.assertEqual(len(app.screen_stack), 1)
+                self.assertIn(
+                    "Ownership is unverified", str(app.query_one("#message", Static).render())
+                )
 
     async def test_close_survives_refresh_replacement(self):
         async with dashboard() as (app, pilot, service, workspace, _attach):
@@ -268,6 +871,7 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
             with (
                 patch.object(service, "list", side_effect=list_workspaces),
                 patch("workspace_manager.tui.Tmux.close") as close,
+                patch("workspace_manager.tui.Tmux.termination_identity", return_value="birth"),
             ):
                 try:
                     app.dispatch("terminal-close")
@@ -278,7 +882,7 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.press("r")
                     self.assertIsNot(app.refresh_worker, first_refresh)
                     await app.workers.wait_for_complete()
-                    close.assert_called_once_with(workspace, "%1")
+                    close.assert_called_once_with(workspace, "%1", expected="birth")
                     self.assertFalse(app.dialog_busy)
                     self.assertTrue(app.is_running)
                 finally:
@@ -329,6 +933,33 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
             await app.workers.wait_for_complete()
             self.assertEqual(app.current, workspace.id)
 
+    async def test_switch_branch_from_explorer_requires_confirmation_and_refreshes_head(self):
+        async with dashboard(integrated=True) as (app, pilot, service, workspace, _attach):
+            repo = next(repo for repo in workspace.repos if repo.name == "alpha")
+            run(["git", "-C", repo.source, "branch", "review"])
+            await app.activate_explorer((workspace.id, "alpha"))
+            self.assertEqual(
+                service.status(workspace.id)["repos"]["alpha"]["branch"], "alpha-branch"
+            )
+            with patch("workspace_manager.terminal.Tmux.require_no_terminals"):
+                for approve in (False, True):
+                    app.dispatch("repo-switch")
+                    await pilot.pause()
+                    app.screen.query_one(Input).value = "review"
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    self.assertIsInstance(app.screen, Confirm)
+                    if approve:
+                        await pilot.click("#confirm")
+                    else:
+                        await pilot.press("escape")
+                    await app.workers.wait_for_complete()
+                    expected = "review" if approve else "alpha-branch"
+                    self.assertEqual(
+                        service.status(workspace.id)["repos"]["alpha"]["branch"], expected
+                    )
+            self.assertIn("review", str(app.query_one("#worktree-context").render()))
+
     async def test_terminal_menu_survives_unrelated_history_refresh(self):
         async with dashboard() as (app, pilot, _service, workspace, _attach):
             await select_workspace(app, workspace)
@@ -337,11 +968,12 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
             app.select_history(Path(workspace.path) / "alpha")
             await app.workers.wait_for_complete()
             await pilot.pause()
-            await pilot.click("#terminal-close")
-            await pilot.pause()
-            self.assertIsInstance(app.screen, Confirm)
-            await pilot.press("escape")
-            await app.workers.wait_for_complete()
+            with patch("workspace_manager.tui.Tmux.termination_identity", return_value="birth"):
+                await pilot.click("#terminal-close")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, Confirm)
+                await pilot.press("escape")
+                await app.workers.wait_for_complete()
 
     async def test_menu_mouse_keyboard_disabled_and_single_menu(self):
         async with dashboard() as (app, pilot, _service, workspace, _attach):

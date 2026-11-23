@@ -65,3 +65,21 @@ def cell_style(table: str | None, column: int, value: str) -> str:
     if (table == "workspaces" and column == 3) or (table == "terminals" and column == 2):
         return PALETTE["muted"]
     return PALETTE["muted"] if table == "conversations" and column == 1 else PALETTE["text"]
+
+
+PREMIUM_PALETTE = {
+    **PALETTE,
+    "bg": "#0D1117",
+    "surface": "#161F2C",
+    "panel": "#161F2C",
+    "selected": "#203149",
+    "border": "#30363D",
+    "text": "#E6EDF3",
+    "muted": "#8B949E",
+    "accent": "#8AB4F8",
+    "accent-soft": "#203149",
+    "branch": "#8AB4F8",
+    "success": "#4ADE80",
+    "warning": "#EABF77",
+    "hover": "#1B2737",
+}

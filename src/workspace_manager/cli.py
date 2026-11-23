@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -12,6 +13,7 @@ import typer
 from .core import Config, Error, Git, Service, Workspace
 from .providers import PROVIDERS, provider
 from .terminal import AI, Tmux, diagnostics
+from .tmux_backends import BackendStore
 
 app = typer.Typer(no_args_is_help=False)
 workspace_app = typer.Typer()
@@ -29,12 +31,28 @@ app.add_typer(memory_app, name="memory")
 
 
 @app.callback(invoke_without_command=True)
-def root(ctx: typer.Context) -> None:
+def root(
+    ctx: typer.Context,
+    classic: Annotated[bool, typer.Option(help="Open the classic dashboard")] = False,
+) -> None:
     """Manage independent Git workspaces and persistent tmux terminals."""
     if ctx.invoked_subcommand is None:
-        from .tui import Manager
+        if classic or not (sys.stdin.isatty() and sys.stdout.isatty()):
+            from .tui import Manager
 
-        Manager(Service()).run()
+            Manager(Service()).run()
+        else:
+            from .split import Display
+
+            Display.configured(Config.load()).attach()
+
+
+@app.command("split")
+def split_workspace() -> None:
+    """Open the persistent terminal workspace."""
+    from .split import Display
+
+    Display.configured(Config.load()).attach()
 
 
 def choose(service: Service) -> Workspace:
@@ -211,14 +229,34 @@ def add(
 @repo_app.command("remove")
 def remove(workspace: str, name: str, yes: bool = False) -> None:
     service = Service()
-    typer.echo(json.dumps(service.status(workspace), indent=2))
+    snapshot = service.get(workspace)
+    repo, _ = service.repo_target(snapshot, name)
+    typer.echo(json.dumps(service.status(snapshot.id), indent=2))
     if yes or typer.confirm(f"Remove clean worktree {name}, preserving branch?", default=False):
-        service.remove(workspace, name, True)
+        service.remove(snapshot.id, name, True, expected_repo=repo)
+
+
+@repo_app.command("switch")
+def switch_repo(workspace: str, name: str, branch: str, yes: bool = False) -> None:
+    """Switch a clean worktree to an existing local branch."""
+    service = Service()
+    if yes:
+        service.switch_branch(workspace, name, branch, True)
+    else:
+        snapshot = service.get(workspace)
+        repo, path = service.repo_target(snapshot, name)
+        expected_head = Git.status(path)["branch"]
+        if not typer.confirm(f"Switch worktree {name} to local branch {branch}?", default=False):
+            return
+        service.switch_branch(
+            snapshot.id, name, branch, True, expected_repo=repo, expected_head=expected_head
+        )
+    typer.echo(f"Worktree {name} switched to {branch}")
 
 
 @repo_app.command("recover")
 def recover_repo(workspace: str, name: str, yes: bool = False) -> None:
-    """Reconcile interrupted add; never remove files or branches."""
+    """Reconcile interrupted worktree changes; preserve files and branches."""
     if yes or typer.confirm(
         "Reconcile interrupted repository metadata, preserving files?", default=False
     ):
@@ -226,8 +264,11 @@ def recover_repo(workspace: str, name: str, yes: bool = False) -> None:
 
 
 @terminal_app.command("list")
-def terminals(workspace: str) -> None:
-    typer.echo(json.dumps(Tmux().list(Service().get(workspace)), indent=2))
+def terminals(workspace: str, backend: str | None = None) -> None:
+    value = Service().get(workspace)
+    rows = Tmux().scoped(value, backend=backend).list(value)
+    fields = ("pane", "command", "cwd", "dead", "kind")
+    typer.echo(json.dumps([{key: row[key] for key in fields} for row in rows], indent=2))
 
 
 @terminal_app.command("new")
@@ -256,8 +297,73 @@ def new_terminal(
 
 
 @terminal_app.command("attach")
-def attach(workspace: str, pane: str | None = None) -> None:
-    Tmux().attach(Service().get(workspace), pane)
+def attach(workspace: str, pane: str | None = None, backend: str | None = None) -> None:
+    value = Service().get(workspace)
+    Tmux().scoped(value, pane, backend=backend).attach(value, pane)
+
+
+@terminal_app.command("backend-register")
+def backend_register(
+    workspace: str,
+    socket: Annotated[Path | None, typer.Option("--socket")] = None,
+    name: Annotated[str | None, typer.Option("--name")] = None,
+    complete_legacy: bool = False,
+) -> None:
+    """Verify and record an existing socket. No session ownership is transferred."""
+    if complete_legacy:
+        typer.confirm(
+            "Have you identified every legacy tmux socket used by this workspace?",
+            abort=True,
+            err=True,
+        )
+    record = Tmux.register_backend(Service().get(workspace), socket, name, complete=complete_legacy)
+    typer.echo(json.dumps(record, indent=2))
+
+
+@terminal_app.command("backend-select")
+def backend_select(workspace: str, backend: str) -> None:
+    """Select the default backend used by the workspace explorer and new sessions."""
+    value = Service().get(workspace)
+    with Tmux().lock(value):
+        value.require_registered()
+        Tmux().scoped(value, backend=backend)
+        BackendStore(value).select(backend)
+
+
+@terminal_app.command("backend-retire")
+def backend_retire(workspace: str, backend: str) -> None:
+    """Retire an empty backend association after checking the evidence."""
+    typer.confirm("Retire this backend from the workspace inventory?", abort=True, err=True)
+    value = Service().get(workspace)
+    Tmux().retire_backend(value, backend)
+
+
+@terminal_app.command("backend-status")
+def backend_status(workspace: str) -> None:
+    """Inspect registered backends and report whether worktree cleanup is safe."""
+    value = Service().get(workspace)
+    records = BackendStore(value).read()
+    for entry in records["backends"]:
+        try:
+            backend = Tmux.registered(entry)
+            entry["sessions"] = [
+                {**row, "ownership": backend.inspect_pane(value, row["pane"]).category}
+                for row in backend.list(value)
+            ]
+            known = {row["pane"] for row in entry["sessions"]}
+            for pane in backend.workspace_processes(value):
+                if pane not in known:
+                    entry["sessions"].append(
+                        {"pane": pane, "ownership": backend.inspect_pane(value, pane).category}
+                    )
+            backend.verify_server()
+            entry["verification"] = "verified"
+        except (Error, OSError) as exc:
+            entry["verification"] = str(exc)
+    check = Tmux().verify_terminals(value)
+    typer.echo(
+        json.dumps({**records, "verification": check.state, "detail": check.detail}, indent=2)
+    )
 
 
 @ai_app.command("launch")

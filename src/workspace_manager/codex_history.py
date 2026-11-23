@@ -26,7 +26,7 @@ from .providers import CodexProvider
 class Conversation:
     id: str
     title: str
-    cwd: Path
+    cwd: Path | None
     updated_at: int
     status: str
 
@@ -48,14 +48,14 @@ class CodexHistory:
     timeout = 15.0
     max_bytes = 4 * 1024 * 1024
 
-    def list(self, cwd: Path, cursor: str | None = None) -> HistoryPage:
+    def list(self, cwd: Path | None, cursor: str | None = None) -> HistoryPage:
         if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 8192):
             raise Error("Invalid Codex history cursor")
-        cwd = cwd.resolve(strict=True)
+        cwd = cwd.resolve(strict=True) if cwd is not None else None
         result = self._request(
-            cwd,
+            cwd or Path.home(),
             {
-                "cwd": str(cwd),
+                **({"cwd": str(cwd)} if cwd is not None else {}),
                 "cursor": cursor,
                 "limit": 50,
                 "sortKey": "updated_at",
@@ -81,8 +81,14 @@ class CodexHistory:
             if not isinstance(row, dict):
                 raise Error("Codex returned invalid conversation metadata")
             raw_cwd = row.get("cwd")
-            # Check the filter locally too: never show another project's history.
-            if not isinstance(raw_cwd, str) or Path(raw_cwd).resolve() != cwd:
+            location = None
+            if isinstance(raw_cwd, str) and Path(raw_cwd).is_absolute():
+                try:
+                    location = Path(raw_cwd).resolve()
+                except (OSError, RuntimeError, ValueError):
+                    pass
+            # Scope must match locally even if the server ignores the filter.
+            if cwd is not None and location != cwd:
                 continue
             identifier = row.get("id")
             if not isinstance(identifier, str):
@@ -100,7 +106,7 @@ class CodexHistory:
                 Conversation(
                     conversation_id(identifier),
                     "".join(c for c in " ".join(title.split()) if c.isprintable())[:160],
-                    cwd,
+                    cwd or location,
                     int(updated),
                     str(status.get("type", "unknown")) if isinstance(status, dict) else "unknown",
                 )

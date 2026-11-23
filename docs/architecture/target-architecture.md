@@ -1,0 +1,15 @@
+# Docelowa architektura WM 3.0
+
+**EVOLVE.** Zachować Python, Textual i dwa zakresy zarządzania tmux. Rzeczywiste testy dają podstawę do użycia istniejących operacji Git, rejestru, pamięci i transportu terminali. Największe ryzyka skupiają się na styku klienta, tożsamości i stanu UI. Własny emulator, zmiana backendu terminalowego i przepisanie domeny zwiększyłyby zakres bez zamknięcia tych ryzyk.
+
+| Granica | Ryzyko i minimalna zmiana | Ślad |
+|---|---|---|
+| Aktywacja terminala | WM-T01 przygotowuje albo przełącza klienta, potwierdza okno i panel, a następnie zapisuje stan kart. Wycofuje zmianę przy awarii lub zastąpieniu żądania z Textual. Watchdog i przełączenie współdzielą blokadę. Przy konkurencyjnym kliencie WM-T02 zwalnia własny podgląd i zachowuje proces oraz kartę. [Walidacja](../testing/wm-t01-focus-regression.md). | WM-T01, WM-SES-03/06, WM-TAB-02 |
+| Własność | WM-T02 rozróżnia panele OWNED, MANAGED, EXTERNAL i UNKNOWN. Guard w kolejce tmux sprawdza instancje panelu i klienta przed zmianą. Zewnętrzny klient może spowodować zwolnienie własnego widoku przez WM. [Kontrakt i ograniczenia](../testing/wm-t02-ownership-reconciliation.md). | WM-T02, WM-SES-04/05 |
+| Trwałość i awarie | Rozdzielić trwałość procesów przy restarcie UI od trwałości opcji po restarcie prywatnego serwera. Zapisać tylko małe, wersjonowane metadane kart, jeżeli kontrakt produktu wymaga tej drugiej gwarancji. Weryfikować stary identyfikator przed odtworzeniem. | WM-T04, WM-TAB-03/04 |
+| Domena i Git | Utrzymać politykę w Service i adapterach. Wydzielić mały interfejs odczytu stanu sesji, aby sprawdzenia Git działały bez importu implementacji tmux. WM-T02 ogranicza czas blokad, uzgadnia kolejność rejestr → workspace i ponawia kontrolę terminali przed usunięciem. WM-T02.1 utrwala zweryfikowane backendy i domyślną preferencję. Niepełny historyczny inwentarz blokuje sprzątanie do czasu jawnego wskazania socketów. [Weryfikacja backendu](../testing/wm-t02-1-backend-registry.md). | WM-T02/03, WM-WT-03/04 |
+| Textual | Wydzielać wyłącznie stan aktywacji i synchronizacji, który ma własne przejścia oraz testy. Pozostałe akcje nadal delegować do istniejących usług. | WM-T01/04, WM-UI-01/02 |
+| Historia i pamięć | Zachować oddzielną tożsamość rozmowy, sesji i zakładki. Wspólna pamięć nadal należy do workspace. Rozszerzenie zakresu pamięci wymaga jawnej polityki. | WM-T05, WM-HIS-01–04, WM-MEM-01/02 |
+| Platformy i dystrybucja | Jeden zintegrowany kod wydania i matryca macOS/Ubuntu. Sprawdzić instalację z artefaktu, wejścia CLI, terminal fizyczny i aktualne obsługiwane wersje agentów. | WM-T06/07, WM-CLI-01, WM-REL-01 |
+
+Operacje równoległe muszą dawać powtarzalny wynik pod blokadą właściciela. Potwierdzenie terminala powinno opisywać tożsamość źródła i celu. Obcy lub nierozpoznany proces pozostaje poza kontrolą aplikacji. Po utracie backendu UI pokazuje błąd i drogę odzyskania, a odtworzenie aktywnej sesji wymaga odnalezienia tego samego procesu. [Roadmapa](../roadmap/implementation-plan.md) definiuje kolejność i weryfikację.
