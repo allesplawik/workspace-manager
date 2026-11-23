@@ -828,6 +828,7 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
     async def test_terminal_opening_message_clears_after_launch_result(self):
         async with dashboard(integrated=True) as (app, pilot, _service, workspace, attach):
             await select_workspace(app, workspace)
+            panes = app.workspace_sessions[workspace.id].copy()
             for outcome in ("%3", Error("Launch failed")):
                 entered, release = threading.Event(), threading.Event()
 
@@ -836,9 +837,13 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
                     ready.wait(3)
                     if isinstance(result, Error):
                         raise result
+                    panes.append({**panes[0], "pane": result, "kind": "shell", "command": "sh"})
                     return result
 
-                with patch("workspace_manager.tui.AI.launch", side_effect=launch):
+                with (
+                    patch("workspace_manager.tui.AI.launch", side_effect=launch),
+                    patch("workspace_manager.tui.Tmux.list", return_value=panes),
+                ):
                     app.launch_ai("shell", True)
                     await pilot.pause()
                     app.screen.query_one("#launch", Button).press()
@@ -850,6 +855,7 @@ class ContextualDashboardTests(unittest.IsolatedAsyncioTestCase):
                     await app.workers.wait_for_complete()
                 expected = str(outcome) if isinstance(outcome, Error) else None
                 self.assertEqual(app.sidebar_message_details, expected)
+            self.assertIn("%3", [card.pane for card in app.query_one(SessionCards).cards])
             attach.assert_called_once_with("%3")
 
     async def test_four_headers_counts_empty_and_context(self):

@@ -2226,6 +2226,8 @@ class Manager(App[None]):
                 session_id=identifier,
                 verify_history_location=True,
             )
+            if self.presenter is not None:
+                self.action_refresh(False)
             if global_resume and self.presenter is not None:
                 self.present_terminal(workspace, pane, expected=launcher.last_identity)
                 return
@@ -2501,6 +2503,8 @@ class Manager(App[None]):
                     await self.refresh_after_operation()
                     return
                 self.message("")
+                if self.presenter is not None:
+                    self.action_refresh(False)
                 if launcher.last_identity is None:
                     self.attach(pane)
                 else:

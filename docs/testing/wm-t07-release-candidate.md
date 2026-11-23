@@ -1,0 +1,67 @@
+# WM-T07 — Workspace Manager 3.0.0rc1
+
+**Status WM-T07: PARTIAL. Release Ready: BLOCKED.**
+
+## Feature Freeze i artefakty
+
+Rewizja kodu `20398fb848c5dcf33770a7f9aa9f19d7e6a57378` wyznacza Feature Freeze. Źródła RC wyeksportowano poleceniem `git archive 20398fb`. Jedyna zmiana w eksporcie przed budową to numer pakietu w `pyproject.toml`, z `3.0.0.dev0` na `3.0.0rc1`. Polecenie `python -m build --outdir <dist> <snapshot>` z Hatchling 1.33.0 zbudowało sdist i następnie wheel z tego sdist.
+
+| Plik | SHA‑256 |
+|---|---|
+| `workspace_manager-3.0.0rc1-py3-none-any.whl` | `337c7463ef43262c88def8a903f47d22ed2fae95c7a5655e99d3781d638ae9e4` |
+| `workspace_manager-3.0.0rc1.tar.gz` | `7b5f470d1aacc9aa86966f29e4dd9714f547ebf6058d2a5b09fca4ea338f8af9` |
+
+Wheel 2.0.0 użyty w migracji ma SHA‑256 `86e8a50b9862b422aecac6bd54537cf1d50a0c482f5110ffe79dba40532e8b76`.
+
+Lokalny pakiet dowodów jest w `features/production-readiness/3.0.0rc1/`. Obejmuje artefakty, `SHA256SUMS`, skrypty smoke i wheel starszej wersji z rewizji `5aec2c0`. W tej walidacji Python importował zainstalowany wheel w skryptach smoke i migracji. Pełna regresja korzystała z tego samego snapshotu źródeł.
+
+## Środowiska i wyniki
+
+| Środowisko | Instalacja, CLI i launchery w PTY | Migracja i powrót na fixture | Pełna regresja |
+|---|---|---|---|
+| macOS Intel 15.8.3, Python 3.12.9, Git 2.50.1, tmux 3.8 | PASS | PASS | 180 testów i 35 subtestów PASS |
+| Ubuntu 24.04 Docker x86_64, Python 3.12.3, Git 2.43.0, tmux 3.4 | PASS | PASS | 180 testów i 35 subtestów PASS |
+| Natywne Ubuntu 24.04 | NOT TESTED | NOT TESTED | NOT TESTED |
+
+Skrypty używają prywatnego HOME, XDG i tmux. Terminal testowy to PTY z `TERM=xterm-256color`. Osobny test w natywnym emulatorze pozostaje NOT TESTED na obu platformach. Sprawdzono TCSS, punkt wejścia, helper `wmcd` w Bash/Zsh, formaty JSON i TSV, kody błędu i wszystkie trzy launchery. Wykonano `ruff check .`, `ruff format --check .`, `mypy src` oraz `python -m pytest -q` w snapshotach testowych. Ruff, format i mypy zakończyły się sukcesem na obu platformach. Pełny pytest trwał 362,38 s na macOS i 239,71 s w Dockerze. Autoryzowane przebiegi na rzeczywistych rozmowach są odłożone. Lokalnie odczytano wersje Codex CLI 0.171.0 i Claude Code 2.1.326.
+
+### Odtworzenie smoke i migracji
+
+W katalogu lokalnych artefaktów zainstaluj każdy wheel w osobnym venv i wskaż oba punkty wejścia. Przebiegi testowe tworzą własny fixture 2.0.0 i odtwarzają kopię tego fixture w tych samych ścieżkach.
+
+```sh
+shasum -a 256 -c SHA256SUMS
+python3.12 -m venv rc-venv
+python3.12 -m venv old-venv
+rc-venv/bin/python -m pip install ./workspace_manager-3.0.0rc1-py3-none-any.whl
+old-venv/bin/python -m pip install ./workspace_manager-2.0.0-py3-none-any.whl
+rc-venv/bin/python smoke.py
+rc-venv/bin/python migration.py old-venv/bin/wm rc-venv/bin/wm
+```
+
+Migracja wykryła działający legacy Shell, jawnie zarejestrowała jego backend, zachowała klasyfikację `managed` i odmówiła usunięcia aktywnego worktree. Przy powrocie porównano bajty skopiowanych metadanych, ID, HEAD dwóch niezależnych repozytoriów, zawartość plików i PID/cwd tego samego Shella. Instrukcja dla użytkownika jest w [projekcie informacji o wydaniu](../release/3.0.0-release-notes.md).
+
+## Ślad kryteriów
+
+| Scenariusz i wymagania | Dowody i pozostała walidacja |
+|---|---|
+| E2E-001, WM-WS-01–03, WM-CFG-01, WM-MULTI-01 | Instalowany CLI, fixture migracji z dwoma repo, `test_second_repo_independent_branch` i `test_delete_requires_confirmation_and_preserves_files`. |
+| E2E-002, WM-WT-01–06 | Fixture aktywnego worktree blokuje usunięcie. `test_switch_branch_preserves_files_and_other_worktrees`, `test_dirty_remove_blocked_and_clean_branch_retained` i testy odzyskania obejmują Git oraz trwałe metadane. |
+| E2E-003/004, WM-SES-01–05 | `test_default_wm_shows_home_and_preserves_workspace_processes`, `test_owned_managed_external_and_replaced_panels` i fixture migracji weryfikują PID, odłączenie, powrót i bezpieczne zakończenie. Smoke rzeczywistych agentów pozostaje otwarty. |
+| E2E-005/006, WM-TAB-01/02/04, WM-UI-01/02 | `test_default_wm_shows_home_and_preserves_workspace_processes` i `test_switching_displayed_tab_syncs_context_and_keeps_selection_independent` weryfikują selekcję, fokus, PTY i rozmiary. |
+| E2E-007, WM-HIS-01–04, WM-MEM-01 | Testy historii Codexa, `test_both_providers_real_ptys_reconnect_resize_input_and_resume`, testy pamięci i ochrony rewizji. Resume rzeczywistych rozmów obu agentów NOT TESTED. |
+| E2E-008, WM-TAB-03/04 | `test_split_collision_preserves_card_and_processes_across_sidebar_restart` obejmuje dwa takie same tytuły, restart, reset nazwy i weryfikację tożsamości. |
+| E2E-009, WM-WT-05, WM-SES-06, WM-TAB-04 | Testy awarii attach i wymuszonego rozłączenia w `tests/test_integrated_display.py`, test utraty prywatnego serwera widoku oraz test zakończenia ostatniego backendu. |
+| WM-CLI-01, WM-REL-01 | Instalacja RC i migracja fixture przeszły w dwóch dostępnych środowiskach. Natywna walidacja Ubuntu, smoke w emulatorze macOS i ręczne próby z rzeczywistymi agentami pozostają bramkami wydania. |
+
+Dowody automatyczne obejmują wskazane zachowania. Pełny status akceptacji na platformach wydania pozostaje otwarty. Weryfikację ręczną agentów przeprowadź według [WM-T05](wm-t05-history-resume.md) i [kontraktu wydania](../release/3.0.0-release-contract.md). Nie ma decyzji Release Ready ani zatwierdzenia publikacji.
+
+## Niezależny review
+
+Porównanie sdist z archiwum Git potwierdziło zmianę wyłącznie numeru wersji. Zweryfikowano sumy, próbę powrotu do 2.0.0 i rozróżnienie środowisk.
+
+## Regresja wykryta w ręcznej próbie RC1
+
+- WM-SES-01 i WM-UI-01. W Ubuntu 24.04 Docker użytkownik zaliczył tworzenie sesji, przełączanie i Terminate. Na macOS i Ubuntu zauważył jednak opóźnienie pojawienia się karty po udanym starcie w tym samym kontekście.
+- Reprodukcja automatyczna. W `test_terminal_opening_message_clears_after_launch_result` launcher zwraca działający nowy panel, a kontrolowane zapytanie o listę już go widzi. Bez cyklicznego odświeżenia sidebar zachowywał dwie poprzednie karty i nie renderował nowej.
+- Poprawka w źródłach inicjuje odświeżenie po udanym starcie lub resume w split. RC1 zachowuje opisaną regresję. Przed akceptacją trzeba zbudować nowego kandydata z poprawką i zebrać dowody dla jego artefaktu.
