@@ -65,3 +65,26 @@ Porównanie sdist z archiwum Git potwierdziło zmianę wyłącznie numeru wersji
 - WM-SES-01 i WM-UI-01. W Ubuntu 24.04 Docker użytkownik zaliczył tworzenie sesji, przełączanie i Terminate. Na macOS i Ubuntu zauważył jednak opóźnienie pojawienia się karty po udanym starcie w tym samym kontekście.
 - Reprodukcja automatyczna. W `test_terminal_opening_message_clears_after_launch_result` launcher zwraca działający nowy panel, a kontrolowane zapytanie o listę już go widzi. Bez cyklicznego odświeżenia sidebar zachowywał dwie poprzednie karty i nie renderował nowej.
 - Poprawka w źródłach inicjuje odświeżenie po udanym starcie lub resume w split. RC1 zachowuje opisaną regresję. Przed akceptacją trzeba zbudować nowego kandydata z poprawką i zebrać dowody dla jego artefaktu.
+
+## Następny kandydat — 3.0.0rc2
+
+RC2 jest aktualnym kandydatem. Zbudowano go z archiwum rewizji `ba14105065f0e402f1ff6cc4cb42cd7d309c54a4` jako wheel z sdist. Jedyną zmianą w plikach kodu względem tego archiwum jest numer pakietu `3.0.0rc2`. Rewizja zawiera udokumentowaną poprawkę po Feature Freeze. Ręczne wyniki RC1 są dowodem dla RC1.
+
+| Plik RC2 | SHA‑256 |
+|---|---|
+| `workspace_manager-3.0.0rc2-py3-none-any.whl` | `c3dd87a55fb3e29b160cdf7867f8bacca6425d559cc2d43d1fbbdd2ed914054d` |
+| `workspace_manager-3.0.0rc2.tar.gz` | `768d48b4e9061f3ae36f5181dc1c5d653fa7c200c0560fa3f309e478278b9b58` |
+
+Artefakty, sumy i skrypty są w `features/production-readiness/3.0.0rc2/`. Testowy kontener `wm-ubuntu-rc2` ma nowy stan runtime i jest oddzielony od `wm-ubuntu-rc1`. Wchodzi się do niego poleceniem `docker exec -it wm-ubuntu-rc2 bash`. Test odświeżania używa workspace `rc-test` i worktree `fixture`. Oczekiwany wynik to pojawienie się nowej sesji po udanym starcie bez ręcznego odświeżania.
+
+Natywne środowiska i logowanie do agentów pozostają do walidacji ręcznej. Status `Release Ready` pozostaje zablokowany.
+
+| Środowisko RC2 | Smoke z wheel | Aktualizacja i odtworzenie 2.0.0 | Regresja źródeł |
+|---|---|---|---|
+| macOS Intel, tmux 3.8 | PASS | PASS | 180 testów i 35 subtestów PASS. Ruff, format i mypy PASS |
+| Ubuntu 24.04 Docker, tmux 3.4 | PASS | PASS | 180 testów i 35 subtestów PASS. Ruff, format i mypy PASS |
+| Natywne Ubuntu 24.04 | NOT TESTED | NOT TESTED | NOT TESTED |
+
+Smoke sprawdził `wm`, `wm --classic` i `wm split` w PTY, formaty CLI i `wmcd` w Bash i Zsh. Migracja i powrót zachowały identyfikatory, konfigurację, HEAD dwóch repozytoriów oraz PID i cwd działającego shella. Niezależny review zweryfikował pochodzenie sdist, sumy i izolację kontenerów.
+
+Ręczna próba w Ubuntu 24.04 w kontenerze RC2: **PASS**. Użytkownik potwierdził, że nowa sesja pojawiła się od razu na liście Sessions, bez ręcznego odświeżania.

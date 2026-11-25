@@ -79,3 +79,5 @@ Pełny przebieg po wznowieniu WM-T02.1 dał 159 testów i 30 subtestów PASS na 
 [WM-T06](wm-t06-launchers.md) zweryfikowano z tego samego wheel `3.0.0.dev0` w czystych środowiskach macOS Intel 15.8.3 z tmux 3.8 i Ubuntu 24.04 Docker z tmux 3.4. Na obu platformach PASS dla CLI, Bash i Zsh `wmcd`, trzech interaktywnych wejść w PTY oraz ukierunkowanej regresji routingu i powrotu po zamknięciu shella (3 testy, 5 subtestów). To dowód deweloperski przed walidacją właściwego RC.
 
 [WM-T07](wm-t07-release-candidate.md), źródła `20398fb` z numerem pakietu `3.0.0rc1`. Pełna regresja dała po 180 testów i 35 subtestów PASS na macOS Intel i Ubuntu 24.04 Docker. Ruff, format i mypy przeszły na obu platformach. Instalacja z tego samego wheel, smoke launcherów i migracja/powrót do 2.0.0 na fixture uzyskały PASS. Natywne Ubuntu i ręczne smoke agentów pozostają otwarte.
+
+RC2 (`ba14105` z numerem pakietu `3.0.0rc2`) przeszedł po 180 testów i 35 subtestów na macOS Intel (315,32 s) i Ubuntu 24.04 Docker (432,99 s). Instalacja z wheel, smoke launcherów i migracja na fixture w obu środowiskach przeszły. [Raport](wm-t07-release-candidate.md).
