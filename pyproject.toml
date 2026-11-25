@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 [project]
 name = "workspace-manager"
-version = "3.0.0rc1"
+version = "3.0.0rc2"
 description = "Safe Git workspaces with Textual and persistent tmux terminals"
 requires-python = ">=3.12"
 dependencies = ["textual>=8.2.8,<9", "typer>=0.12,<1"]
