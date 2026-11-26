@@ -1,5 +1,7 @@
 name: quality
 on: [push, pull_request]
+permissions:
+  contents: read
 jobs:
   check:
     strategy:
@@ -21,3 +23,9 @@ jobs:
       - run: uv tool install .
       - run: wm --help
       - run: wm doctor
+  release_artifacts:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-artifacts.yml
