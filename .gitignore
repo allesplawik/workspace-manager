@@ -11,3 +11,11 @@ dist/
 /IMPLEMENTATION_STATUS.md
 /features/
 .DS_Store
+
+# Internal release planning and verification notes
+/docs/development/
+/docs/plans/
+/docs/research/
+/docs/requirements/
+/docs/roadmap/
+/docs/testing/

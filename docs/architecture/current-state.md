@@ -1,6 +1,6 @@
 # Architektura zastana WM 3.0
 
-Audyt obejmuje istniejący worktree `experiment/integrated-terminal-workspace`, bazę `5dfa1e5` oraz zastane zmiany PoC D w katalogu roboczym. Główny worktree `main` wskazuje `5aec2c0` i ma oddzielną zmianę powrotu po zakończeniu shella. Porównanie i konsolidacja tych ścieżek są warunkiem wydania. Status funkcji wynika z [macierzy](../roadmap/feature-matrix.md) i [baseline](../testing/baseline-report.md).
+Audyt obejmuje istniejący worktree `experiment/integrated-terminal-workspace`, bazę `5dfa1e5` oraz zastane zmiany PoC D w katalogu roboczym. Główny worktree `main` wskazuje `5aec2c0` i ma oddzielną zmianę powrotu po zakończeniu shella. Porównanie i konsolidacja tych ścieżek są warunkiem wydania.
 
 | Obszar | Kod i odpowiedzialność |
 |---|---|
@@ -24,4 +24,4 @@ Audyt obejmuje istniejący worktree `experiment/integrated-terminal-workspace`, 
 
 ## Status wcześniejszych eksperymentów
 
-PoC A potwierdził wykonalność split przez tmux i stanowi podstawę D; PoC D ma własną implementację split i backend aplikacji. PoC B i C pozostają materiałem badawczym, a pakiet i wejście CLI nie zależą od Herdr, Tauri ani xterm.js. Raporty D opisują [split](../research/integrated-terminal-validation.md), [kontekst](../research/poc-d-context-aware-explorer.md), [zakładki](../research/poc-d-session-tabs.md) i [własność](../research/tmux-session-ownership.md). Ich wyniki historyczne nie zastępują bieżącego uruchomienia.
+PoC A potwierdził wykonalność split przez tmux i stanowi podstawę D; PoC D ma własną implementację split i backend aplikacji. PoC B i C pozostają materiałem badawczym, a pakiet i wejście CLI nie zależą od Herdr, Tauri ani xterm.js. Raporty D opisują split, kontekst, zakładki i własność. Ich wyniki historyczne nie zastępują bieżącego uruchomienia.
