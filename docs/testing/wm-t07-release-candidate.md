@@ -77,7 +77,7 @@ RC2 jest aktualnym kandydatem. Zbudowano go z archiwum rewizji `ba14105065f0e402
 
 Artefakty, sumy i skrypty są w `features/production-readiness/3.0.0rc2/`. Testowy kontener `wm-ubuntu-rc2` ma nowy stan runtime i jest oddzielony od `wm-ubuntu-rc1`. Wchodzi się do niego poleceniem `docker exec -it wm-ubuntu-rc2 bash`. Test odświeżania używa workspace `rc-test` i worktree `fixture`. Oczekiwany wynik to pojawienie się nowej sesji po udanym starcie bez ręcznego odświeżania.
 
-Natywne środowiska i logowanie do agentów pozostają do walidacji ręcznej. Status `Release Ready` pozostaje zablokowany.
+Walidacja na natywnym Ubuntu, w tym próby agentów, pozostaje otwarta. Status `Release Ready` pozostaje zablokowany.
 
 | Środowisko RC2 | Smoke z wheel | Aktualizacja i odtworzenie 2.0.0 | Regresja źródeł |
 |---|---|---|---|
@@ -88,3 +88,19 @@ Natywne środowiska i logowanie do agentów pozostają do walidacji ręcznej. St
 Smoke sprawdził `wm`, `wm --classic` i `wm split` w PTY, formaty CLI i `wmcd` w Bash i Zsh. Migracja i powrót zachowały identyfikatory, konfigurację, HEAD dwóch repozytoriów oraz PID i cwd działającego shella. Niezależny review zweryfikował pochodzenie sdist, sumy i izolację kontenerów.
 
 Ręczna próba w Ubuntu 24.04 w kontenerze RC2: **PASS**. Użytkownik potwierdził, że nowa sesja pojawiła się od razu na liście Sessions, bez ręcznego odświeżania.
+
+Otwarte bramki i próby ręczne RC2 są zebrane w [checkliście wydania](../release/3.0.0-release-checklist.md).
+
+Sprawdzenie konsolidacji na źródłach RC2 w macOS Intel: routing launcherów i dwa przypadki powrotu po wyjściu z shella dały 3 testy i 5 subtestów PASS. Dodatkowa próba z zainstalowanym wheel RC2 na dwóch testowych repozytoriach potwierdziła zmianę brancha, usuwanie czystych worktrees z zachowaniem branchy oraz wyrejestrowanie z zachowaniem katalogu. Próba korzystała z osobnego backendu tmux i powłoki w `rc-anchor`.
+
+### RC2 w natywnym Terminal.app na macOS Intel
+
+- **PASS:** zainstalowany wheel uruchomił `wm`, `wm split` i `wm --classic` w Terminal.app 2.14. Potwierdzono klientów rzeczywistego emulatora dla obu wejść split i render klasycznego dashboardu w osobnym oknie.
+- **PASS:** dwie sesje Bash w osobnych worktrees fixture. W rzeczywistym widoku A → B → A i aktywacja zakładki zachowały PID, cwd i zmienną środowiskową. Odłączenie prawego widoku oraz odłączenie całego klienta i powrót przez `wm split` zachowały tę samą sesję. Zmiana szerokości okna i sidebar 28/36/50 kolumn przeszły. Zamknięcie ostatniej karty zachowało proces. Zakończenie A pozostawiło działający B. Po zakończeniu B sidebar pokazał `No sessions`.
+- Akcje sesji i kart wywołano przez API RC2 i polecenia tmux w odizolowanym fixture. Ten przebieg potwierdza natywny renderer i działanie kontrolera. Poprzedni przebieg automatyczny PTY pokrywa zdarzenia wejściowe i routing.
+- **PASS (próba użytkownika):** na macOS Intel zadziałały skróty `Ctrl+B`, potem `f`, `z`, `←` lub `→`. Kliknięcie worktree zmieniło kontekst przy zachowaniu terminala, kliknięcie zakładki przełączyło sesję, a otwarcie i zamknięcie menu `⋯` zachowało aktywną sesję.
+- **PASS (zgłoszenie użytkownika):** użytkownik potwierdził działanie opisanych prób Codex CLI i Claude Code na macOS Intel. Brak dostępnego natywnego hosta Ubuntu lub skonfigurowanej VM Ubuntu w lokalnym VirtualBox. Status `RELEASE READY` pozostaje zablokowany.
+
+### Ręczne smoke agentów RC2 w Ubuntu 24.04 w Dockerze
+
+Użytkownik zgłosił **PASS** dla prób Codex CLI i Claude Code wykonanych w kontenerze `wm-ubuntu-rc2`. Scenariusze obejmowały powrót do żywej sesji i wznowienie zapisanej rozmowy we właściwym worktree oraz anulowanie natywnego pickera Claude. Wynik dotyczy Dockera. Próby agentów na natywnym Ubuntu pozostają otwarte. Wynik zgłoszony dla macOS Intel jest w sekcji wyżej.
