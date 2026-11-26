@@ -1,0 +1,149 @@
+name: Release artifacts
+
+on:
+  workflow_call:
+
+concurrency:
+  group: workspace-manager-rc-tags
+  queue: max
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Select next RC tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.select.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Read existing tags and select a version
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
+            --jq '.[] | [.ref, .object.sha] | @tsv' > "$RUNNER_TEMP/wm-tags"
+          python3 - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          declared = re.fullmatch(r"([0-9]+\.[0-9]+\.[0-9]+)rc([1-9][0-9]*)", project["version"])
+          if declared is None:
+              print("Stable versions follow the separate release approval process.")
+              raise SystemExit(0)
+          series, floor = declared.groups()
+          pattern = re.compile(rf"refs/tags/v{re.escape(series)}rc([1-9][0-9]*)")
+          highest = int(floor)
+          tags = Path(os.environ["RUNNER_TEMP"]) / "wm-tags"
+          for line in tags.read_text().splitlines():
+              ref, sha = line.split("\t")
+              match = pattern.fullmatch(ref)
+              if match is None:
+                  continue
+              if sha == os.environ["GITHUB_SHA"]:
+                  print(f"Commit already tagged: {ref}")
+                  raise SystemExit(0)
+              highest = max(highest, int(match[1]))
+          version = f"{series}rc{highest + 1}"
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+              print(f"version={version}", file=output)
+          PY
+  package:
+    needs: version
+    if: needs.version.outputs.version != ''
+    name: Build and verify wheel and sdist
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Set version in the build checkout
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          path = Path("pyproject.toml")
+          source = path.read_text()
+          declared = tomllib.loads(source)["project"]["version"]
+          old = f'version = "{declared}"'
+          if source.splitlines().count(old) != 1:
+              raise SystemExit("Expected one project version line")
+          version = os.environ["RELEASE_VERSION"]
+          path.write_text(source.replace(old, f'version = "{version}"', 1))
+          PY
+      - name: Build sdist and wheel
+        run: |
+          python -m venv "$RUNNER_TEMP/wm-build"
+          build_python="$RUNNER_TEMP/wm-build/bin/python"
+          "$build_python" -m pip install build
+          "$build_python" -m build
+      - name: Verify wheel installation and record checksums
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          python -m venv "$RUNNER_TEMP/wm-release"
+          release_bin="$RUNNER_TEMP/wm-release/bin"
+          "$release_bin/python" -m pip install dist/*.whl
+          (
+            cd "$RUNNER_TEMP"
+            "$release_bin/python" - <<'PY'
+          import os
+          import sys
+          from importlib.metadata import version
+          from pathlib import Path
+
+          from workspace_manager.tui import Manager
+
+          assert version("workspace-manager") == os.environ["RELEASE_VERSION"]
+          assert Manager.CSS_PATH.is_file(), "Missing dashboard TCSS"
+          assert (Path(sys.prefix) / "share/workspace-manager/wm.sh").is_file(), "Missing wmcd helper"
+          PY
+            "$release_bin/wm" --help
+            "$release_bin/wm" doctor
+          )
+          printf 'revision=%s\ntag=v%s\n' "$GITHUB_SHA" "$RELEASE_VERSION" > dist/BUILD-INFO.txt
+          (
+            cd dist
+            sha256sum -- *.whl *.tar.gz > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: workspace-manager-${{ needs.version.outputs.version }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/BUILD-INFO.txt
+          if-no-files-found: error
+  tag:
+    name: Publish verified RC tag
+    needs: [version, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Create tag without replacing existing refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/v$RELEASE_VERSION" -f "sha=$GITHUB_SHA"
