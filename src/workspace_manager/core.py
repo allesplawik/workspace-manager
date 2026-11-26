@@ -24,6 +24,23 @@ class Error(Exception):
     """An actionable user-facing failure."""
 
 
+@contextlib.contextmanager
+def bounded_flock(stream: Any, mode: int, message: str, timeout: float = 5) -> Iterator[None]:
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(stream, mode | fcntl.LOCK_NB)
+            break
+        except BlockingIOError as exc:
+            if time.monotonic() >= deadline:
+                raise Error(message) from exc
+            time.sleep(0.03)
+    try:
+        yield
+    finally:
+        fcntl.flock(stream, fcntl.LOCK_UN)
+
+
 def run(args: list[str], cwd: Path | None = None) -> str:
     try:
         result = subprocess.run(
@@ -186,6 +203,7 @@ class Repo:
     branch: str | None = None
     ref: str = "HEAD"
     phase: str = "pending"
+    generation: str | None = None
 
 
 @dataclass
@@ -199,6 +217,34 @@ class Workspace:
     schema_version: int = 1
     default_agent: str | None = None
     conflict_policy: str | None = None
+
+    registry: Path | None = field(default=None, init=False, compare=False, repr=False)
+
+    def encode(self) -> dict[str, Any]:
+        data = asdict(self)
+        del data["registry"]
+        return data
+
+    def require_registered(self) -> None:
+        if self.registry is not None:
+            try:
+                data = json.loads(no_symlinks(self.registry).read_text())
+                record = data["workspaces"][self.id]
+                metadata = json.loads(
+                    no_symlinks(Path(self.path) / ".wm/workspace.json").read_text()
+                )
+                if (
+                    data["schema_version"] == metadata["schema_version"] == 1
+                    and record["path"] == metadata["path"] == self.path
+                    and metadata["id"] == self.id
+                    and record["phase"] == metadata["phase"] == "ready"
+                ):
+                    return
+            except (OSError, KeyError, TypeError, ValueError) as exc:
+                raise Error("Workspace registration cannot be verified") from exc
+            raise Error(
+                "Workspace is not ready or was replaced; check repo recover or workspace recover"
+            )
 
     @classmethod
     def decode(cls, value: dict[str, Any]) -> Workspace:
@@ -306,12 +352,11 @@ class Service:
     @contextlib.contextmanager
     def lock(self) -> Iterator[None]:
         path = no_symlinks(self.state / "lock")
-        with path.open("a") as stream:
-            fcntl.flock(stream, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(stream, fcntl.LOCK_UN)
+        with (
+            path.open("a") as stream,
+            bounded_flock(stream, fcntl.LOCK_EX, "Workspace registry is busy"),
+        ):
+            yield
 
     def index(self) -> dict[str, Any]:
         if not self.registry.exists():
@@ -330,6 +375,7 @@ class Service:
                 workspace = self.read(workspace)
             except (Error, OSError, ValueError):
                 workspace.phase = "missing" if not Path(workspace.path).exists() else "unknown"
+            workspace.registry = self.registry
             result.append(workspace)
         return sorted(result, key=lambda w: w.activity, reverse=True)
 
@@ -349,9 +395,11 @@ class Service:
         return current
 
     def save(self, workspace: Workspace) -> None:
-        atomic(Path(workspace.path) / ".wm/workspace.json", asdict(workspace))
+        workspace.registry = self.registry
+        metadata = workspace.encode()
+        atomic(Path(workspace.path) / ".wm/workspace.json", metadata)
         data = self.index()
-        data["workspaces"][workspace.id] = asdict(workspace)
+        data["workspaces"][workspace.id] = metadata
         atomic(self.registry, data)
 
     def create(
@@ -366,7 +414,13 @@ class Service:
             if repo_name in {".wm", "CLAUDE.md", "AGENTS.md"}:
                 raise Error("Reserved workspace filename")
             source = Git.source(first_repo["source"])
-            repo = Repo(repo_name, str(source), first_repo["branch"], first_repo["ref"])
+            repo = Repo(
+                repo_name,
+                str(source),
+                first_repo["branch"],
+                first_repo["ref"],
+                generation=uuid.uuid4().hex,
+            )
             command = Git.command(
                 source, path / repo_name, repo.branch, repo.ref, first_repo["new"]
             )
@@ -383,7 +437,10 @@ class Service:
                 workspace.repos.append(repo)
             self.save(workspace)
             try:
+                from .tmux_backends import BackendStore
+
                 self.context(workspace)
+                BackendStore(workspace).initialize()
                 if command is not None:
                     run(command)
                 if repo is not None:
@@ -440,7 +497,7 @@ class Service:
             if target.exists() or any(r.name == name for r in workspace.repos):
                 raise Error("Repository destination exists")
             command = Git.command(source, target, branch, ref, new)
-            repo = Repo(name, str(source), branch, ref)
+            repo = Repo(name, str(source), branch, ref, generation=uuid.uuid4().hex)
             workspace.repos.append(repo)
             workspace.phase = "incomplete"
             self.save(workspace)  # journal intent before Git; recovery never guesses success
@@ -461,57 +518,130 @@ class Service:
     def status(self, key: str) -> dict[str, Any]:
         workspace = self.get(key)
         return {
-            "workspace": asdict(workspace),
+            "workspace": workspace.encode(),
             "repos": {r.name: Git.status(Path(workspace.path) / r.name) for r in workspace.repos},
         }
 
-    def remove(self, key: str, name: str, confirmed: bool = False) -> None:
+    @staticmethod
+    def repo_target(workspace: Workspace, name: str) -> tuple[Repo, Path]:
+        repo = next((r for r in workspace.repos if r.name == name), None)
+        if repo is None:
+            raise Error("Repository not found")
+        return repo, no_symlinks(Path(workspace.path) / safe_name(name))
+
+    @staticmethod
+    def registered_worktree(repo: Repo, target: Path) -> bool:
+        output = run(["git", "-C", repo.source, "worktree", "list", "--porcelain", "-z"])
+        return f"worktree {target}" in output.split("\0")
+
+    def clean_worktree(self, repo: Repo, target: Path) -> dict[str, str]:
+        if repo.phase != "ready":
+            raise Error("Recover interrupted repository metadata first")
+        state = Git.status(target)
+        if state["status"] != "clean":
+            raise Error("Only clean, present worktrees may be changed")
+        if not self.registered_worktree(repo, target):
+            raise Error("Worktree ownership cannot be verified")
+        common = ["rev-parse", "--path-format=absolute", "--git-common-dir"]
+        if run(["git", "-C", str(target), *common]) != run(["git", "-C", repo.source, *common]):
+            raise Error("Worktree ownership cannot be verified")
+        prefix = ["git", "-C", str(target)]
+        if run([*prefix, "ls-files", "-z", "--others", "--ignored", "--exclude-standard"]):
+            raise Error("Ignored files are present; preserve or move them first")
+        flags = run([*prefix, "ls-files", "-v", "-z"])
+        if any(entry and (entry[0].islower() or entry[0] == "S") for entry in flags.split("\0")):
+            raise Error(
+                "Index has assume-unchanged/skip-worktree flags; audit these files manually"
+            )
+        return state
+
+    def remove(
+        self,
+        key: str,
+        name: str,
+        confirmed: bool = False,
+        *,
+        expected_repo: Repo | None = None,
+    ) -> None:
         if not confirmed:
             raise Error("Removal requires explicit confirmation")
         from .terminal import Tmux
 
         with self.lock():
             workspace = self.get(key)
-            with Tmux().lock(workspace):
+            backend = Tmux()
+            with backend.lock(workspace):
                 if not shutil_available("tmux"):
                     raise Error("Install tmux to verify no active terminals before removal")
-                if Tmux().list(workspace):
-                    raise Error(
-                        "Active terminals: detach is not termination; close them explicitly first"
-                    )
-                repo = next((r for r in workspace.repos if r.name == name), None)
-                if repo is None:
-                    raise Error("Repository not found")
-                target = no_symlinks(Path(workspace.path) / safe_name(name))
-                if Git.status(target)["status"] != "clean":
-                    raise Error("Only clean, present worktrees may be removed")
-                ignored = run(
-                    [
-                        "git",
-                        "-C",
-                        str(target),
-                        "ls-files",
-                        "-z",
-                        "--others",
-                        "--ignored",
-                        "--exclude-standard",
-                    ]
-                )
-                if ignored:
-                    raise Error("Ignored files are present; preserve or move them before removal")
-                flags = run(["git", "-C", str(target), "ls-files", "-v", "-z"])
-                if any(
-                    entry and (entry[0].islower() or entry[0] == "S") for entry in flags.split("\0")
-                ):
-                    raise Error(
-                        "Index has assume-unchanged/skip-worktree flags; audit these files manually"
-                    )
-                registered = run(["git", "-C", repo.source, "worktree", "list", "--porcelain"])
-                if f"worktree {target}\n" not in registered + "\n":
-                    raise Error("Worktree ownership cannot be verified")
+                backend.require_no_terminals(workspace)
+                repo, target = self.repo_target(workspace, name)
+                if expected_repo is not None and repo != expected_repo:
+                    raise Error("Worktree changed after selection; reopen the remove dialog")
+                self.clean_worktree(repo, target)
+                repo.phase = "removing"
+                workspace.phase = "incomplete"
+                self.save(workspace)
+                backend.require_no_terminals(workspace)
                 run(["git", "-C", repo.source, "worktree", "remove", str(target)])
                 workspace.repos.remove(repo)
+                self.finish_repo_operation(workspace)
+
+    def switch_branch(
+        self,
+        key: str,
+        name: str,
+        branch: str,
+        confirmed: bool = False,
+        *,
+        expected_repo: Repo | None = None,
+        expected_head: str | None = None,
+    ) -> Workspace:
+        if not confirmed:
+            raise Error("Branch change requires explicit confirmation")
+        if not branch or branch.startswith(("-", "@")) or "\x00" in branch:
+            raise Error("Specify an existing local branch name")
+        from .terminal import Tmux
+
+        with self.lock():
+            workspace = self.get(key)
+            backend = Tmux()
+            with backend.lock(workspace):
+                if not shutil_available("tmux"):
+                    raise Error("Install tmux to verify no active terminals before switching")
+                backend.require_no_terminals(workspace)
+                repo, target = self.repo_target(workspace, name)
+                if expected_repo is not None and repo != expected_repo:
+                    raise Error("Worktree changed after selection; reopen the switch dialog")
+                state = self.clean_worktree(repo, target)
+                if expected_head is not None and state["branch"] != expected_head:
+                    raise Error("Worktree HEAD changed after selection; reopen the switch dialog")
+                git = ["git", "-C", str(target)]
+                ref = "refs/heads/" + branch
+                run([*git, "check-ref-format", "--branch", branch])
+                run([*git, "show-ref", "--verify", ref])
+                if state["branch"] == branch:
+                    return workspace
+                worktrees = run([*git, "worktree", "list", "--porcelain", "-z"])
+                if f"branch {ref}" in worktrees.split("\0"):
+                    raise Error("Branch already in use by another worktree")
+                repo.phase = "switching"
+                workspace.phase = "incomplete"
                 self.save(workspace)
+                backend.require_no_terminals(workspace)
+                run([*git, "switch", "--no-guess", "--no-overwrite-ignore", "--", branch])
+                if run([*git, "symbolic-ref", "HEAD"]) != ref:
+                    raise Error("Worktree HEAD changed unexpectedly; inspect and recover metadata")
+                repo.branch = branch
+                repo.phase = "ready"
+                self.finish_repo_operation(workspace)
+                return workspace
+
+    def finish_repo_operation(self, workspace: Workspace) -> None:
+        workspace.phase = (
+            "ready" if all(r.phase == "ready" for r in workspace.repos) else "incomplete"
+        )
+        workspace.activity = time.time()
+        self.save(workspace)
 
     def delete(self, key: str, confirmed: bool = False) -> None:
         if not confirmed:
@@ -527,27 +657,27 @@ class Service:
             workspace = self.get(key)
             if workspace.repos:
                 raise Error("Remove repositories individually first")
-            if not shutil_available("tmux"):
-                raise Error("Install tmux to verify no active terminals before removal")
-            if Tmux().list(workspace):
-                raise Error("Close active terminals first")
-            root = no_symlinks(Path(workspace.path))
-            allowed = {".wm", "CLAUDE.md", "AGENTS.md"}
-            if any(p.name not in allowed for p in root.iterdir()):
-                raise Error("Workspace contains additional files; preserve/move them manually")
-            # Retain instructions and metadata: deletion unregisters, never destroys user files.
-            data = self.index()
-            del data["workspaces"][workspace.id]
-            atomic(self.registry, data)
+            with Tmux().lock(workspace):
+                if not shutil_available("tmux"):
+                    raise Error("Install tmux to verify no active terminals before removal")
+                Tmux().require_no_terminals(workspace)
+                root = no_symlinks(Path(workspace.path))
+                allowed = {".wm", "CLAUDE.md", "AGENTS.md"}
+                if any(p.name not in allowed for p in root.iterdir()):
+                    raise Error("Workspace contains additional files; preserve/move them manually")
+                # Retain instructions and metadata: deletion unregisters, never destroys user files.
+                data = self.index()
+                del data["workspaces"][workspace.id]
+                atomic(self.registry, data)
 
     def recover(self, path: Path) -> Workspace:
         """Explicitly re-index metadata after interrupted registry write; no Git mutation."""
         path = no_symlinks(path)
-        raw = json.loads((path / ".wm/workspace.json").read_text())
-        workspace = Workspace.decode(raw)
-        if workspace.path != str(path):
-            raise Error("Recovery path mismatch")
         with self.lock():
+            raw = json.loads(no_symlinks(path / ".wm/workspace.json").read_text())
+            workspace = Workspace.decode(raw)
+            if workspace.path != str(path):
+                raise Error("Recovery path mismatch")
             data = self.index()
             if any(
                 w["name"] == workspace.name and w["id"] != workspace.id
@@ -568,9 +698,8 @@ class Service:
                 raise Error("Select a pending or failed repository")
             source = Git.source(Path(repo.source))
             target = no_symlinks(Path(workspace.path) / safe_name(name))
-            registered = run(["git", "-C", str(source), "worktree", "list", "--porcelain"])
-            owned = f"worktree {target}\n" in registered + "\n"
-            if not target.exists() and not owned:
+            owned = self.registered_worktree(repo, target)
+            if not target.exists() and not owned and repo.phase != "switching":
                 workspace.repos.remove(repo)
             elif target.is_dir() and owned:
                 state = Git.status(target)
@@ -600,15 +729,14 @@ class Service:
                 )
                 if state["status"] not in {"clean", "modified"} or common != expected:
                     raise Error("Cannot verify interrupted worktree ownership")
+                branch = state["branch"]
+                repo.branch = None if branch.startswith("detached:") else branch
                 repo.phase = "ready"
             else:
                 raise Error(
                     "Ambiguous interrupted operation; preserve files and inspect git worktree list"
                 )
-            workspace.phase = (
-                "ready" if all(r.phase == "ready" for r in workspace.repos) else "incomplete"
-            )
-            self.save(workspace)
+            self.finish_repo_operation(workspace)
             return workspace
 
     def set_agent(self, key: str, provider: str | None, conflict_policy: str | None = None) -> None:

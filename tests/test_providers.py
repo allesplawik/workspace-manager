@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from fake_cli import make_cli
 
+from workspace_manager.conversation_titles import ConversationTitles
 from workspace_manager.core import Config, Error, Service, Workspace, run
 from workspace_manager.providers import ClaudeProvider, CodexProvider, ShellProvider, provider
 from workspace_manager.terminal import AI, Tmux
@@ -198,15 +199,25 @@ class ProviderTmuxTests(unittest.TestCase):
                 launcher = AI(config)
                 tmux = Tmux()
                 try:
-                    claude = launcher.launch(workspace, "claude", "resume")
+                    target = Path(workspace.path) / "selected"
+                    target.mkdir()
+                    claude = launcher.launch(workspace, "claude", "resume", cwd=target)
                     codex = launcher.launch(workspace, "codex", "continue")
                     for name in ("claude", "codex"):
                         self.wait_for(logs / (name + ".json"))
-                    self.assertTrue(json.loads((logs / "claude.json").read_text())["tty"])
+                    self.assertEqual(
+                        json.loads((logs / "claude.json").read_text()),
+                        {
+                            "provider": "claude",
+                            "argv": ["--resume"],
+                            "cwd": str(target),
+                            "tty": True,
+                        },
+                    )
                     self.assertEqual(
                         json.loads((logs / "codex.json").read_text())["argv"], ["resume", "--last"]
                     )
-                    self.assertEqual(AI(config).launch(workspace, "claude"), claude)
+                    self.assertEqual(AI(config).launch(workspace, "claude", cwd=target), claude)
                     self.assertEqual(len(tmux.list(workspace)), 2)
                     run(["tmux", "send-keys", "-t", codex, "hello", "Enter"])
                     run(
@@ -232,8 +243,42 @@ class ProviderTmuxTests(unittest.TestCase):
                         and time.monotonic() < deadline
                     ):
                         time.sleep(0.05)
-                    resumed = AI(config).launch(workspace, "claude", "continue")
-                    self.assertNotEqual(resumed, claude)
+                    self.assertFalse(any(p["pane"] == claude for p in tmux.list(workspace)))
+                    retained = AI(config).launch(workspace, "claude", "continue")
+                    self.assertNotEqual(retained, claude)
+                    run(["tmux", "send-keys", "-t", codex, "exit", "Enter"])
+                    deadline = time.monotonic() + 5
+                    while (
+                        any(p["pane"] == codex for p in tmux.list(workspace))
+                        and time.monotonic() < deadline
+                    ):
+                        time.sleep(0.05)
+                    self.assertFalse(any(p["pane"] == codex for p in tmux.list(workspace)))
+                    identifier = "12345678-1234-1234-1234-123456789abc"
+                    ConversationTitles(Service(config)).set("codex", identifier, "Review")
+                    restarted = Service(config)
+                    self.assertEqual(
+                        ConversationTitles(restarted).read()["codex:" + identifier], "Review"
+                    )
+                    (logs / "codex.json").unlink()
+                    resumed = AI(config).launch(
+                        restarted.get(workspace.id),
+                        "codex",
+                        "resume",
+                        target,
+                        session_id=identifier,
+                    )
+                    self.assertNotEqual(resumed, codex)
+                    self.wait_for(logs / "codex.json")
+                    self.assertEqual(
+                        json.loads((logs / "codex.json").read_text()),
+                        {
+                            "provider": "codex",
+                            "argv": ["resume", identifier],
+                            "cwd": str(target),
+                            "tty": True,
+                        },
+                    )
                 finally:
                     with contextlib.suppress(Error):
                         run(["tmux", "kill-session", "-t", "=" + tmux.session(workspace)])

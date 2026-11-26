@@ -26,7 +26,7 @@ from .providers import CodexProvider
 class Conversation:
     id: str
     title: str
-    cwd: Path
+    cwd: Path | None
     updated_at: int
     status: str
 
@@ -48,14 +48,14 @@ class CodexHistory:
     timeout = 15.0
     max_bytes = 4 * 1024 * 1024
 
-    def list(self, cwd: Path, cursor: str | None = None) -> HistoryPage:
+    def list(self, cwd: Path | None, cursor: str | None = None) -> HistoryPage:
         if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 8192):
             raise Error("Invalid Codex history cursor")
-        cwd = cwd.resolve(strict=True)
+        cwd = cwd.resolve(strict=True) if cwd is not None else None
         result = self._request(
-            cwd,
+            cwd or Path.home(),
             {
-                "cwd": str(cwd),
+                **({"cwd": str(cwd)} if cwd is not None else {}),
                 "cursor": cursor,
                 "limit": 50,
                 "sortKey": "updated_at",
@@ -81,8 +81,14 @@ class CodexHistory:
             if not isinstance(row, dict):
                 raise Error("Codex returned invalid conversation metadata")
             raw_cwd = row.get("cwd")
-            # Check the filter locally too: never show another project's history.
-            if not isinstance(raw_cwd, str) or Path(raw_cwd).resolve() != cwd:
+            location = None
+            if isinstance(raw_cwd, str) and Path(raw_cwd).is_absolute():
+                try:
+                    location = Path(raw_cwd).resolve()
+                except (OSError, RuntimeError, ValueError):
+                    pass
+            # Scope must match locally even if the server ignores the filter.
+            if cwd is not None and location != cwd:
                 continue
             identifier = row.get("id")
             if not isinstance(identifier, str):
@@ -100,7 +106,7 @@ class CodexHistory:
                 Conversation(
                     conversation_id(identifier),
                     "".join(c for c in " ".join(title.split()) if c.isprintable())[:160],
-                    cwd,
+                    cwd or location,
                     int(updated),
                     str(status.get("type", "unknown")) if isinstance(status, dict) else "unknown",
                 )
@@ -199,16 +205,26 @@ class CodexHistory:
             selector.close()
             with contextlib.suppress(OSError):
                 stdin.close()
+
             # The private short-lived service must not outlive this metadata request.
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGTERM)
+            def stop_group(signum: signal.Signals) -> None:
+                try:
+                    os.killpg(process.pid, signum)
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    # On macOS a group whose leader is exiting may reject a group signal.
+                    # Popen signals the leader only if it has not already exited.
+                    with contextlib.suppress(PermissionError):
+                        process.send_signal(signum)
+
+            stop_group(signal.SIGTERM)
             try:
                 process.wait(timeout=0.2)
             except subprocess.TimeoutExpired:
                 pass
             # A leader can exit before descendants that ignore TERM. Escalate for
             # the whole private group even when the leader was already reaped.
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
+            stop_group(signal.SIGKILL)
             process.wait()
             stdout.close()

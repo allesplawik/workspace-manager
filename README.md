@@ -1,8 +1,8 @@
-# Workspace Manager 2.0
+# Workspace Manager 3.0
 
 Independent workspace manager: Python 3.12+, Textual management UI, real persistent tmux terminals, and independent Git worktrees. No Herdr dependency.
 
-## Install on macOS (Intel / Apple Silicon)
+## Install on macOS
 
 Install Python 3.12+, Git, tmux and uv using your package manager, for example:
 
@@ -35,7 +35,9 @@ Update after obtaining new source: `uv tool install --reinstall --python 3.12 .`
 
 ## Use
 
-`wm` starts the TUI from any directory. Click a workspace or use the arrow keys to select its context; Enter opens it. N opens the workspace wizard including its first repository; A adds another repository through the tree browser. Enter any accessible absolute directory to browse outside the default source root. Choose an existing branch, a new branch with a start ref/SHA, or detached HEAD; review the Git command before confirming. Each repository has its own branch.
+In an interactive terminal, `wm` opens the integrated workspace with the Explorer on the left and tmux terminals on the right. `wm split` explicitly opens the same view. Use **Ctrl-b, then d** to leave the integrated view and keep its sessions available for reconnect. With redirected input or output, the bare `wm` command retains the classic dashboard fallback. For scripts use explicit subcommands.
+
+`wm --classic` starts the classic dashboard from any directory. The following navigation and shortcuts describe the classic view. Click a workspace or use the arrow keys to select its context; Enter opens it. N opens the workspace wizard including its first repository; A adds another repository through the tree browser. Enter any accessible absolute directory to browse outside the default source root. Choose an existing branch, a new branch with a start ref/SHA, or detached HEAD; review the Git command before confirming. Each repository has its own branch.
 
 T opens a real tmux session. C/X launch Claude/Codex with new, resume picker or continue mode and a workspace/repository cwd. Enter on a terminal row attaches to that pane. Detach with **Ctrl-b, then d** to return to the manager. When WM runs outside tmux and attaches to a selected pane, exiting that pane (for example Ctrl-D in a shell) also returns to WM; other panes and processes remain running. WM started inside tmux retains native switch-client behavior. Q exits only the manager. Processes remain in tmux; detach does not terminate them. Use **Close selected terminal** in the Terminals menu or exit the process inside tmux before removing worktrees. A live AI process is distinct from provider conversation history. G refreshes actual Git status; S edits agent defaults and provider arguments; ? opens help. Search filters workspaces; most recently changed workspaces sort first.
 
@@ -64,7 +66,7 @@ wm workspace delete task # unregister empty workspace, retain files
 
 `wm workspace create` with no name and `wm repo add task` run interactive CLI wizards. Automation must specify a branch or `--detached` when adding a repo. Existing branches use `--existing`; occupied branches are refused without force. `wm workspace create NAME --source PATH --branch BRANCH --yes` creates and populates in one invocation.
 
-Source `shell/wm.sh`, then use `wmcd task` to change the parent shell directory. Interactive selection is `wm workspace select`; pass a name/ID with `--print-path` for scripting.
+Source `shell/wm.sh` from the checkout, or source `share/workspace-manager/wm.sh` relative to the Python environment where you installed the wheel. For example, with an activated virtual environment use `. "$VIRTUAL_ENV/share/workspace-manager/wm.sh"`. Then use `wmcd task` to change the parent shell directory. Interactive selection is `wm workspace select`; pass a name/ID with `--print-path` for scripting.
 
 ## Saved Codex conversations
 

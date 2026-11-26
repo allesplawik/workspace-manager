@@ -40,6 +40,59 @@ class CLITests(unittest.TestCase):
                 status = runner.invoke(app, ["workspace", "status", "sample"])
                 self.assertEqual(json.loads(status.output)["workspace"]["name"], "sample")
 
+    def test_default_launcher_routing_preserves_classic_and_subcommands(self):
+        from types import SimpleNamespace
+
+        from workspace_manager.cli import root, split_workspace
+
+        for stdin_tty, stdout_tty, classic, subcommand, expected in (
+            (True, True, False, None, "integrated"),
+            (True, True, True, None, "classic"),
+            (False, True, False, None, "classic"),
+            (True, False, False, None, "classic"),
+            (True, True, False, "workspace", None),
+        ):
+            with (
+                self.subTest(stdin=stdin_tty, stdout=stdout_tty, classic=classic, cmd=subcommand),
+                patch("workspace_manager.cli.sys.stdin.isatty", return_value=stdin_tty),
+                patch("workspace_manager.cli.sys.stdout.isatty", return_value=stdout_tty),
+                patch("workspace_manager.cli.Config.load"),
+                patch("workspace_manager.cli.Service"),
+                patch("workspace_manager.split.Display.configured") as display,
+                patch("workspace_manager.tui.Manager") as manager,
+            ):
+                root(SimpleNamespace(invoked_subcommand=subcommand), classic)
+                self.assertEqual(display.return_value.attach.call_count, expected == "integrated")
+                self.assertEqual(manager.return_value.run.call_count, expected == "classic")
+
+        with (
+            patch("workspace_manager.cli.Config.load"),
+            patch("workspace_manager.split.Display.configured") as display,
+        ):
+            split_workspace()
+            display.return_value.attach.assert_called_once_with()
+
+    def test_repo_switch_cli_requires_confirmation(self):
+        from typer.testing import CliRunner
+
+        from workspace_manager.cli import app
+
+        with (
+            patch("workspace_manager.cli.Service") as service,
+            patch("workspace_manager.cli.Git.status", return_value={"branch": "main"}),
+        ):
+            service.return_value.repo_target.return_value = (object(), Path("/tmp/worktree"))
+            runner = CliRunner()
+            args = ["repo", "switch", "workspace", "repo", "review"]
+            cancelled = runner.invoke(app, args, input="n\n")
+            self.assertEqual(cancelled.exit_code, 0, cancelled.output)
+            service.return_value.switch_branch.assert_not_called()
+            result = runner.invoke(app, [*args, "--yes"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            service.return_value.switch_branch.assert_called_once_with(
+                "workspace", "repo", "review", True
+            )
+
 
 @unittest.skipUnless(HAS_UI, "Textual unavailable; install .[dev]")
 class UITests(unittest.IsolatedAsyncioTestCase):
@@ -111,7 +164,7 @@ class RealTmuxTests(unittest.TestCase):
                     script = (
                         "from workspace_manager.core import Workspace; "
                         "from workspace_manager.terminal import Tmux; "
-                        f"Tmux().attach(Workspace(**{workspace.__dict__!r}), {shell!r})"
+                        f"Tmux().attach(Workspace.decode({workspace.encode()!r}), {shell!r})"
                     )
                     client = subprocess.Popen(
                         [sys.executable, "-c", script],
@@ -181,6 +234,8 @@ class RealTmuxTests(unittest.TestCase):
                     )
                     with self.assertRaisesRegex(Error, "no longer available"):
                         tmux.close(workspace, foreign)
+                    with self.assertRaisesRegex(Error, "no longer available"):
+                        tmux.rename(workspace, foreign, "Foreign")
                     run(
                         [
                             "tmux",
@@ -193,6 +248,8 @@ class RealTmuxTests(unittest.TestCase):
                     )
                     with self.assertRaisesRegex(Error, "no longer private"):
                         tmux.close(workspace, foreign)
+                    with self.assertRaisesRegex(Error, "no longer private"):
+                        tmux.rename(workspace, foreign, "Foreign")
                     tmux.close(workspace, selected)
                     self.assertEqual(
                         {pane["pane"] for pane in tmux.list(workspace)}, {survivor, foreign}

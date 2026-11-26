@@ -176,6 +176,25 @@ class CoreTests(unittest.TestCase):
         self.service.recover(Path(self.workspace.path))
         self.assertEqual(self.service.get("task").id, self.workspace.id)
 
+    def test_recovery_reads_metadata_after_acquiring_registry_lock(self):
+        from contextlib import contextmanager
+
+        workspace = self.add()
+        metadata = Path(workspace.path) / ".wm/workspace.json"
+        original_lock = self.service.lock
+
+        @contextmanager
+        def lock_after_concurrent_write():
+            with original_lock():
+                workspace.repos[0].branch = "newer"
+                atomic(metadata, workspace.encode())
+                yield
+
+        with patch.object(self.service, "lock", side_effect=lock_after_concurrent_write):
+            recovered = self.service.recover(Path(workspace.path))
+        self.assertEqual(recovered.repos[0].branch, "newer")
+        self.assertEqual(self.service.get(workspace.id).repos[0].branch, "newer")
+
     def test_pending_not_claimed_ready(self):
         self.workspace.phase = "creating"
         self.service.save(self.workspace)
@@ -322,6 +341,94 @@ class CoreTests(unittest.TestCase):
         self.service.repair_repo("task", "repo", True)
         self.assertEqual(self.service.get("task").repos[0].phase, "ready")
 
+    def test_switch_branch_preserves_files_and_other_worktrees(self):
+        workspace = self.add()
+        target = Path(workspace.path) / "repo"
+        git = ["git", "-C", str(self.source)]
+        run([*git, "branch", "review"])
+        (target / "local").write_text("preserve")
+        with self.assertRaisesRegex(Error, "Only clean"):
+            self.service.switch_branch("task", "repo", "review", True)
+        self.assertEqual((target / "local").read_text(), "preserve")
+        (target / "local").unlink()
+        with self.assertRaisesRegex(Error, "another worktree"):
+            self.service.switch_branch("task", "repo", "main", True)
+        with (
+            patch.object(Tmux, "list", return_value=[{"pane": "%1", "dead": "0"}]),
+            self.assertRaisesRegex(Error, "Active terminals"),
+        ):
+            self.service.switch_branch("task", "repo", "review", True)
+        with self.assertRaisesRegex(Error, "confirmation"):
+            self.service.switch_branch("task", "repo", "review")
+        updated = self.service.switch_branch("task", "repo", "review", True)
+        self.assertEqual(updated.repos[0].branch, "review")
+        self.assertEqual(Git.status(target)["branch"], "review")
+        self.assertEqual(Git.status(self.source)["branch"], "main")
+        self.assertEqual(run([*git, "branch", "--list", "task-branch"]), "task-branch")
+        reopened = Service(self.service.config)
+        self.assertEqual(reopened.get("task").repos[0].branch, "review")
+
+    def test_recovery_after_git_mutation_before_final_save(self):
+        workspace = self.add()
+        target = Path(workspace.path) / "repo"
+        git = ["git", "-C", str(self.source)]
+        run([*git, "branch", "review"])
+        with (
+            patch.object(self.service, "finish_repo_operation", side_effect=OSError("disk")),
+            self.assertRaises(OSError),
+        ):
+            self.service.switch_branch("task", "repo", "review", True)
+        self.assertEqual(Git.status(target)["branch"], "review")
+        reopened = Service(self.service.config)
+        self.assertEqual(reopened.get("task").repos[0].phase, "switching")
+        repaired = reopened.repair_repo("task", "repo", True)
+        self.assertEqual((repaired.phase, repaired.repos[0].branch), ("ready", "review"))
+
+        with (
+            patch.object(reopened, "finish_repo_operation", side_effect=OSError("disk")),
+            self.assertRaises(OSError),
+        ):
+            reopened.remove("task", "repo", True)
+        self.assertFalse(target.exists())
+        self.assertEqual(reopened.get("task").repos[0].phase, "removing")
+        self.assertEqual(reopened.repair_repo("task", "repo", True).repos, [])
+        self.assertEqual(run([*git, "branch", "--list", "review"]), "review")
+
+    def test_switch_refuses_readded_alias_using_original_confirmation(self):
+        workspace = self.add()
+        original = workspace.repos[0]
+        self.service.remove("task", "repo", True)
+        replacement = self.add("replacement")
+        with self.assertRaisesRegex(Error, "changed after selection"):
+            self.service.switch_branch("task", "repo", "main", True, expected_repo=original)
+        with self.assertRaisesRegex(Error, "changed after selection"):
+            self.service.remove("task", "repo", True, expected_repo=original)
+        self.assertEqual(self.service.get("task").repos[0], replacement.repos[0])
+
+    def test_recover_after_final_metadata_write_but_before_index(self):
+        workspace = self.add()
+        target = Path(workspace.path) / "repo"
+        run(["git", "-C", str(self.source), "branch", "review"])
+
+        def fail_final_index(path, data):
+            if (
+                path == self.service.registry
+                and data["workspaces"][workspace.id]["phase"] == "ready"
+            ):
+                raise OSError("index write failed")
+            atomic(path, data)
+
+        with (
+            patch("workspace_manager.core.atomic", side_effect=fail_final_index),
+            self.assertRaisesRegex(OSError, "index write failed"),
+        ):
+            self.service.switch_branch("task", "repo", "review", True)
+        self.assertEqual(Git.status(target)["branch"], "review")
+        with self.assertRaisesRegex(Error, "workspace recover"):
+            self.service.get("task").require_registered()
+        self.service.recover(Path(workspace.path)).require_registered()
+        self.assertEqual(self.service.get("task").repos[0].branch, "review")
+
     def test_tmux_permission_failure_is_not_absence(self):
         import subprocess
 
@@ -336,7 +443,10 @@ class CoreTests(unittest.TestCase):
         with (
             patch.object(Tmux, "exists", return_value=True),
             patch("workspace_manager.terminal.shutil.which", return_value="/bin/tmux"),
-            patch("workspace_manager.terminal.run", return_value="%3\tsleep\t/work\t0\t\twm-end"),
+            patch(
+                "workspace_manager.terminal.run",
+                return_value="%3\tsleep\t/work\t0\t\t\t/work\t10/20/30\twm-end",
+            ),
         ):
             self.assertEqual(Tmux().list(self.workspace)[0]["kind"], "")
 

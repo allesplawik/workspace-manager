@@ -192,7 +192,7 @@ class NativeDashboardMouseTests(unittest.TestCase):
                     script = (
                         "from workspace_manager.core import Workspace; "
                         "from workspace_manager.terminal import Tmux; "
-                        f"Tmux().attach(Workspace(**{workspace.__dict__!r}), {pane!r})"
+                        f"Tmux().attach(Workspace.decode({workspace.encode()!r}), {pane!r})"
                     )
                     client = subprocess.Popen(
                         [sys.executable, "-c", script],

@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 [project]
 name = "workspace-manager"
-version = "2.0.0"
+version = "3.0.0rc2"
 description = "Safe Git workspaces with Textual and persistent tmux terminals"
 requires-python = ">=3.12"
 dependencies = ["textual>=8.2.8,<9", "typer>=0.12,<1"]
@@ -11,6 +11,9 @@ dependencies = ["textual>=8.2.8,<9", "typer>=0.12,<1"]
 dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
 [project.scripts]
 wm = "workspace_manager.cli:main"
+[tool.hatch.build.targets.wheel.shared-data]
+"shell/wm.sh" = "share/workspace-manager/wm.sh"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
